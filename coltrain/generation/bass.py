@@ -487,3 +487,96 @@ def generate_two_feel_bass(chords, total_beats: int, swing: bool = True) -> List
         current_midi = beat3_midi
 
     return notes
+
+
+def generate_modal_bass(chords, total_beats: int, swing: bool = True) -> List[NoteEvent]:
+    """Generate a modal/pedal-point bass line — root and 5th, half/whole notes.
+
+    Used for modal jazz (Impressions, So What, etc.) where the harmony is
+    static and the bass provides a drone-like foundation.
+    """
+    if not chords:
+        return []
+
+    notes: List[NoteEvent] = []
+    total_bars = total_beats // 4
+    current_midi = _nearest_bass_note(chords[0].root_pc, 40)
+
+    for bar_idx in range(total_bars):
+        bar_start_beat = bar_idx * 4.0
+        bar_start_tick = bar_idx * TICKS_PER_BAR
+
+        chord = _chord_at_beat(chords, bar_start_beat)
+        if chord is None:
+            continue
+
+        root_pc = chord.root_pc
+        # Find the 5th interval
+        intervals = CHORD_TONES.get(chord.quality, (0, 4, 7))
+        fifth_interval = 7
+        for iv in intervals:
+            if 6 <= iv <= 8:
+                fifth_interval = iv
+                break
+        fifth_pc = (root_pc + fifth_interval) % 12
+
+        root_midi = _nearest_bass_note(root_pc, current_midi)
+        fifth_midi = _nearest_bass_note(fifth_pc, root_midi)
+
+        # Pattern varies per bar
+        pattern_roll = random.random()
+        if pattern_roll < 0.5:
+            # Whole note on root
+            tick = _humanize_tick(bar_start_tick, amount=5)
+            vel = _humanize_velocity(random.randint(80, 95))
+            notes.append(NoteEvent(
+                pitch=root_midi,
+                start_tick=tick,
+                duration_ticks=TICKS_PER_BAR - 40,
+                velocity=vel,
+                channel=0,
+            ))
+        elif pattern_roll < 0.8:
+            # Half note root, half note 5th
+            tick1 = _humanize_tick(bar_start_tick, amount=5)
+            vel1 = _humanize_velocity(random.randint(80, 95))
+            notes.append(NoteEvent(
+                pitch=root_midi,
+                start_tick=tick1,
+                duration_ticks=2 * TICKS_PER_QUARTER - 40,
+                velocity=vel1,
+                channel=0,
+            ))
+            tick2 = _humanize_tick(bar_start_tick + 2 * TICKS_PER_QUARTER, amount=5)
+            vel2 = _humanize_velocity(random.randint(75, 90))
+            notes.append(NoteEvent(
+                pitch=fifth_midi,
+                start_tick=tick2,
+                duration_ticks=2 * TICKS_PER_QUARTER - 40,
+                velocity=vel2,
+                channel=0,
+            ))
+        else:
+            # Half note 5th, half note root (inverted)
+            tick1 = _humanize_tick(bar_start_tick, amount=5)
+            vel1 = _humanize_velocity(random.randint(75, 90))
+            notes.append(NoteEvent(
+                pitch=fifth_midi,
+                start_tick=tick1,
+                duration_ticks=2 * TICKS_PER_QUARTER - 40,
+                velocity=vel1,
+                channel=0,
+            ))
+            tick2 = _humanize_tick(bar_start_tick + 2 * TICKS_PER_QUARTER, amount=5)
+            vel2 = _humanize_velocity(random.randint(80, 95))
+            notes.append(NoteEvent(
+                pitch=root_midi,
+                start_tick=tick2,
+                duration_ticks=2 * TICKS_PER_QUARTER - 40,
+                velocity=vel2,
+                channel=0,
+            ))
+
+        current_midi = root_midi
+
+    return notes

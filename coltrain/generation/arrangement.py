@@ -14,9 +14,11 @@ from coltrain.theory.chord import ChordEvent
 from coltrain.theory.pitch import NOTE_TO_PC
 
 from coltrain.generation.melody import generate_head_melody, generate_solo, generate_trading_fours
-from coltrain.generation.bass import generate_walking_bass, generate_two_feel_bass
-from coltrain.generation.drums import generate_drums
+from coltrain.generation.bass import generate_walking_bass, generate_two_feel_bass, generate_modal_bass
+from coltrain.generation.drums import generate_drums, generate_modal_drums
 from coltrain.generation.piano import generate_comping
+from coltrain.generation.humanize import humanize_track
+from coltrain.generation.reharmonize import reharmonize
 
 # ---------------------------------------------------------------------------
 # ArrangementSection data type
@@ -482,14 +484,22 @@ def _generate_intro(
     section: ArrangementSection,
     chords: List[ChordEvent],
     swing: bool,
+    bass_style: str = "walking",
+    drum_style: str = "swing",
 ) -> Dict[str, List[NoteEvent]]:
     """Generate intro section: sparse piano voicings, two-feel bass, light drums."""
     section_chords = _chords_for_section(chords, section)
     beats = section.total_beats
     tick_offset = section.start_beat * TICKS_PER_QUARTER
 
-    bass_notes = generate_two_feel_bass(section_chords, beats, swing=swing)
-    drum_notes = generate_drums(beats, intensity=0.2, swing=swing, fill_every=0)
+    if bass_style == "modal":
+        bass_notes = generate_modal_bass(section_chords, beats, swing=swing)
+    else:
+        bass_notes = generate_two_feel_bass(section_chords, beats, swing=swing)
+    if drum_style == "modal":
+        drum_notes = generate_modal_drums(beats, intensity=0.2, swing=swing, fill_every=0)
+    else:
+        drum_notes = generate_drums(beats, intensity=0.2, swing=swing, fill_every=0)
     piano_notes = generate_comping(section_chords, beats, intensity=0.2, swing=swing)
 
     _offset_notes(bass_notes, tick_offset)
@@ -508,6 +518,9 @@ def _generate_head(
     section: ArrangementSection,
     chords: List[ChordEvent],
     swing: bool,
+    coltrane: bool = False,
+    bass_style: str = "walking",
+    drum_style: str = "swing",
 ) -> Dict[str, List[NoteEvent]]:
     """Generate head section: melody + full rhythm section."""
     section_chords = _chords_for_section(chords, section)
@@ -515,9 +528,16 @@ def _generate_head(
     tick_offset = section.start_beat * TICKS_PER_QUARTER
 
     melody_notes = generate_head_melody(section_chords, float(beats), swing=swing)
-    bass_notes = generate_walking_bass(section_chords, beats, swing=swing)
-    drum_notes = generate_drums(beats, intensity=section.intensity, swing=swing, fill_every=8)
-    piano_notes = generate_comping(section_chords, beats, intensity=section.intensity, swing=swing)
+    if bass_style == "modal":
+        bass_notes = generate_modal_bass(section_chords, beats, swing=swing)
+    else:
+        bass_notes = generate_walking_bass(section_chords, beats, swing=swing)
+    if drum_style == "modal":
+        drum_notes = generate_modal_drums(beats, intensity=section.intensity, swing=swing, fill_every=8)
+    else:
+        drum_notes = generate_drums(beats, intensity=section.intensity, swing=swing, fill_every=8)
+    piano_notes = generate_comping(section_chords, beats, intensity=section.intensity,
+                                   swing=swing, coltrane=coltrane)
 
     _offset_notes(melody_notes, tick_offset)
     _offset_notes(bass_notes, tick_offset)
@@ -539,6 +559,9 @@ def _generate_solo_section(
     swing: bool,
     coltrane: bool,
     seed: Optional[int],
+    density_scale: float = 1.0,
+    bass_style: str = "walking",
+    drum_style: str = "swing",
 ) -> Dict[str, List[NoteEvent]]:
     """Generate solo section: improvised melody + rhythm section at increasing intensity."""
     section_chords = _chords_for_section(chords, section)
@@ -547,8 +570,10 @@ def _generate_solo_section(
 
     solo_seed = None
     if seed is not None:
-        # Derive a unique seed for each solo section so they differ
         solo_seed = seed + hash(section.name) % 10000
+
+    # Scale intensity by multi-chorus arc density_scale
+    scaled_intensity = min(1.0, section.intensity * density_scale)
 
     melody_notes = generate_solo(
         section_chords, float(beats),
@@ -557,13 +582,23 @@ def _generate_solo_section(
         coltrane=coltrane,
         seed=solo_seed,
     )
-    bass_notes = generate_walking_bass(section_chords, beats, swing=swing)
-    drum_notes = generate_drums(
-        beats, intensity=section.intensity, swing=swing,
-        fill_every=4 if section.intensity > 0.6 else 8,
-    )
+    if bass_style == "modal":
+        bass_notes = generate_modal_bass(section_chords, beats, swing=swing)
+    else:
+        bass_notes = generate_walking_bass(section_chords, beats, swing=swing)
+    if drum_style == "modal":
+        drum_notes = generate_modal_drums(
+            beats, intensity=scaled_intensity, swing=swing,
+            fill_every=4 if scaled_intensity > 0.6 else 8,
+        )
+    else:
+        drum_notes = generate_drums(
+            beats, intensity=scaled_intensity, swing=swing,
+            fill_every=4 if scaled_intensity > 0.6 else 8,
+        )
     piano_notes = generate_comping(
-        section_chords, beats, intensity=section.intensity, swing=swing,
+        section_chords, beats, intensity=scaled_intensity, swing=swing,
+        coltrane=coltrane,
     )
 
     _offset_notes(melody_notes, tick_offset)
@@ -583,6 +618,8 @@ def _generate_trading_section(
     section: ArrangementSection,
     chords: List[ChordEvent],
     swing: bool,
+    bass_style: str = "walking",
+    drum_style: str = "swing",
 ) -> Dict[str, List[NoteEvent]]:
     """Generate trading fours: melody plays 4 bars, drums fill 4 bars, repeat.
 
@@ -593,13 +630,14 @@ def _generate_trading_section(
     beats = section.total_beats
     tick_offset = section.start_beat * TICKS_PER_QUARTER
 
-    # Melody: trading fours generates notes only for the melody's bars
     melody_notes = generate_trading_fours(
         section_chords, float(beats), intensity=section.intensity,
     )
 
-    # Bass and piano continue throughout
-    bass_notes = generate_walking_bass(section_chords, beats, swing=swing)
+    if bass_style == "modal":
+        bass_notes = generate_modal_bass(section_chords, beats, swing=swing)
+    else:
+        bass_notes = generate_walking_bass(section_chords, beats, swing=swing)
     piano_notes = generate_comping(
         section_chords, beats, intensity=section.intensity, swing=swing,
     )
@@ -821,23 +859,28 @@ def generate_arrangement(
     coltrane: bool = False,
     swing: bool = True,
     seed: Optional[int] = None,
+    humanize: bool = True,
+    tempo: int = 140,
+    bass_style: str = "walking",
+    drum_style: str = "swing",
+    reharmonize_density: str = "off",
 ) -> Dict[str, List[NoteEvent]]:
     """Generate the full arrangement by orchestrating all instrument generators.
 
-    This is the master function that iterates through each ArrangementSection,
-    generates the appropriate content for each instrument, handles beat offsets,
-    and merges everything into the final track dictionary.
-
     Args:
         arrangement: List of ArrangementSection objects from build_arrangement.
-        chords: Full chord progression (absolute beat positions) from
-                build_chord_progression.
+        chords: Full chord progression (absolute beat positions).
         form_bars: Number of bars in one chorus of the form.
         key_pc: Key pitch class (0-11).
-        tension_curve: Tension curve type for solos ('arc', 'build', 'wave').
+        tension_curve: Tension curve type for solos.
         coltrane: Enable Coltrane features.
         swing: Apply swing feel.
         seed: Random seed for reproducibility.
+        humanize: Apply post-processing humanization.
+        tempo: BPM (used for humanization timing).
+        bass_style: 'walking' or 'modal'.
+        drum_style: 'swing' or 'modal'.
+        reharmonize_density: 'off', 'light', 'medium', 'heavy'.
 
     Returns:
         Dict with keys 'melody', 'piano', 'bass', 'drums', each containing
@@ -853,24 +896,68 @@ def generate_arrangement(
         "drums": [],
     }
 
+    # Count solo sections for multi-chorus arc
+    solo_sections = [s for s in arrangement if s.is_solo]
+    num_solos = len(solo_sections)
+
     for section in arrangement:
+        # Reharmonize solo section chords if enabled
+        section_chords = chords
+        if section.is_solo and reharmonize_density != "off":
+            section_chord_slice = _chords_for_section(chords, section)
+            reharmed = reharmonize(section_chord_slice, reharmonize_density)
+            # Re-offset back to absolute beat positions
+            tick_offset_beats = section.start_beat
+            for c in reharmed:
+                c.start_beat += tick_offset_beats
+            # Build a modified chord list: replace chords in this section's range
+            section_chords = [c for c in chords
+                              if c.start_beat < section.start_beat
+                              or c.start_beat >= section.end_beat]
+            section_chords.extend(reharmed)
+            section_chords.sort(key=lambda c: c.start_beat)
+
+        # Multi-chorus arc: scale solo intensity by position
+        if section.is_solo and num_solos >= 3:
+            solo_idx = solo_sections.index(section)
+            if solo_idx == 0:
+                density_scale = 0.7  # Exploratory
+            elif solo_idx == num_solos - 1:
+                density_scale = 1.3  # Climactic
+            else:
+                density_scale = 1.0  # Normal
+        else:
+            density_scale = 1.0
+
         if section.name == "intro":
-            section_notes = _generate_intro(section, chords, swing)
+            section_notes = _generate_intro(section, section_chords, swing,
+                                            bass_style, drum_style)
         elif section.name in ("head_in", "head_out"):
-            section_notes = _generate_head(section, chords, swing)
+            section_notes = _generate_head(section, section_chords, swing,
+                                           coltrane, bass_style, drum_style)
         elif section.is_solo:
             section_notes = _generate_solo_section(
-                section, chords, tension_curve, swing, coltrane, seed,
+                section, section_chords, tension_curve, swing, coltrane, seed,
+                density_scale, bass_style, drum_style,
             )
         elif section.is_trading:
-            section_notes = _generate_trading_section(section, chords, swing)
+            section_notes = _generate_trading_section(section, section_chords, swing,
+                                                      bass_style, drum_style)
         elif section.name == "coda":
-            section_notes = _generate_coda(section, chords, swing)
+            section_notes = _generate_coda(section, section_chords, swing)
         else:
-            # Unknown section type -- generate as a head
-            section_notes = _generate_head(section, chords, swing)
+            section_notes = _generate_head(section, section_chords, swing,
+                                           coltrane, bass_style, drum_style)
 
         _merge_tracks(tracks, section_notes)
+
+    # Post-processing: humanization
+    if humanize:
+        for track_name in tracks:
+            instrument = track_name  # "melody", "piano", "bass", "drums"
+            tracks[track_name] = humanize_track(
+                tracks[track_name], instrument, tempo=tempo, intensity=0.5,
+            )
 
     # Sort all tracks by start_tick for clean output
     for track_name in tracks:

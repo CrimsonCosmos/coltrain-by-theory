@@ -97,6 +97,16 @@ class TensionCurve:
         ),
         "build": lambda x: x ** 0.6,
         "wave": lambda x: 0.5 * x + 0.5 * math.sin(x * 3 * math.pi) * 0.3 + 0.3,
+        "plateau": lambda x: (
+            min(0.75, x / 0.3 * 0.75) if x < 0.3
+            else 0.75 if x < 0.8
+            else 0.75 * (1.0 - (x - 0.8) / 0.2)
+        ),
+        "catharsis": lambda x: (
+            0.2 + x / 0.6 * 0.3 if x < 0.6
+            else 0.5 + (x - 0.6) / 0.15 * 0.5 if x < 0.75
+            else 1.0 - (x - 0.75) / 0.25 * 0.9
+        ),
     }
 
     def __init__(self, curve_name: str = "arc"):
@@ -870,6 +880,315 @@ def _generate_tier3_phrase(current_beat: float, phrase_beats: float,
 
 
 # ---------------------------------------------------------------------------
+# Extended phrase generators (pentatonic, call-response, triplet)
+# ---------------------------------------------------------------------------
+
+
+def _generate_pentatonic_super_phrase(current_beat: float, phrase_beats: float,
+                                      chords: List[ChordEvent], current_pitch: int,
+                                      params: MusicParams, swing: bool,
+                                      coltrane: bool) -> Tuple[List[NoteEvent], int, float]:
+    """Pentatonic superimposition: play a pentatonic scale from a different root
+    than the chord root to create modal color.
+
+    Returns:
+        (notes, last_pitch, beat_after_phrase)
+    """
+    notes = []
+    beat = current_beat
+    pitch = current_pitch
+    phrase_end = current_beat + phrase_beats
+
+    chord = _get_chord_at_beat(chords, beat)
+    if chord is None:
+        return notes, pitch, beat
+
+    low = params.register_low
+    high = params.register_high
+
+    # Determine superimposed pentatonic root based on chord quality
+    root = chord.root_pc
+    q = chord.quality
+    if q in ("maj7", "maj", "6"):
+        penta_root = (root + 2) % 12  # whole step up = lydian sound
+    elif q in ("dom7", "7"):
+        penta_root = (root + random.choice([2, 10])) % 12  # up or down a step
+    elif q in ("min7", "min", "min6"):
+        penta_root = (root + 3) % 12  # minor third up = natural minor sound
+    else:
+        penta_root = root  # regular pentatonic
+
+    # Build pentatonic scale in range: intervals (0, 2, 4, 7, 9)
+    penta_intervals = (0, 2, 4, 7, 9)
+    penta_notes = []
+    for midi_note in range(low, high + 1):
+        interval = (midi_note % 12 - penta_root) % 12
+        if interval in penta_intervals:
+            penta_notes.append(midi_note)
+
+    if not penta_notes:
+        # Fallback: just use chord tones
+        return _generate_tier2_phrase(current_beat, phrase_beats, chords,
+                                      current_pitch, params, swing, coltrane)
+
+    # Generate 6-10 notes using stepwise motion through pentatonic scale
+    num_notes = random.randint(6, 10)
+    # Find starting position in pentatonic scale nearest to current pitch
+    start_note = min(penta_notes, key=lambda t: abs(t - pitch))
+    idx = penta_notes.index(start_note)
+    direction = random.choice([-1, 1])
+
+    for i in range(num_notes):
+        if beat >= phrase_end:
+            break
+
+        if 0 <= idx < len(penta_notes):
+            note_midi = penta_notes[idx]
+        else:
+            # Reverse direction at boundary
+            direction = -direction
+            idx = max(0, min(len(penta_notes) - 1, idx))
+            note_midi = penta_notes[idx]
+
+        # Mostly 8th notes, occasional quarter
+        dur = 0.5 if random.random() < 0.75 else 1.0
+        if beat + dur > phrase_end:
+            dur = phrase_end - beat
+            if dur <= 0:
+                break
+
+        tick = _beat_to_tick(beat)
+        if swing:
+            tick = _apply_swing(tick)
+        tick = _humanize(tick)
+        dur_ticks = int(dur * TICKS_PER_QUARTER)
+        vel = _choose_velocity(params)
+
+        notes.append(NoteEvent(
+            pitch=note_midi,
+            start_tick=tick,
+            duration_ticks=dur_ticks,
+            velocity=vel,
+        ))
+
+        pitch = note_midi
+        beat += dur
+        idx += direction
+
+    return notes, pitch, beat
+
+
+def _generate_call_response_phrase(current_beat: float, phrase_beats: float,
+                                    chords: List[ChordEvent], current_pitch: int,
+                                    params: MusicParams, swing: bool,
+                                    coltrane: bool) -> Tuple[List[NoteEvent], int, float]:
+    """Call-and-response: generate a short 'call' melody, then respond with a
+    transformed version (transposed, inverted, or rhythmically shifted).
+
+    Returns:
+        (notes, last_pitch, beat_after_phrase)
+    """
+    notes = []
+    beat = current_beat
+    pitch = current_pitch
+    phrase_end = current_beat + phrase_beats
+
+    # Split phrase roughly in half
+    half_beats = phrase_beats / 2.0
+
+    # --- Call: generate a short melody (4-6 notes, chord tones) ---
+    call_notes_data = []  # list of (pitch, dur) for interval extraction
+    call_end = beat + half_beats
+    call_note_count = random.randint(4, 6)
+    call_played = 0
+
+    while beat < call_end and call_played < call_note_count:
+        chord = _get_chord_at_beat(chords, beat)
+        if chord is None:
+            beat += 0.5
+            continue
+
+        low = params.register_low
+        high = params.register_high
+
+        target = _nearest_chord_tone(pitch, chord.root_pc, chord.quality, low, high)
+        # Voice leading: prefer stepwise
+        if abs(target - pitch) > 5:
+            scale_tones = _scale_tones_in_range(chord.root_pc, chord.quality, low, high)
+            if scale_tones:
+                closer = [t for t in scale_tones if abs(t - pitch) <= 4]
+                if closer:
+                    target = random.choice(closer)
+
+        dur = random.choice([0.5, 0.5, 1.0, 1.0])
+        if beat + dur > call_end:
+            dur = call_end - beat
+            if dur <= 0:
+                break
+
+        tick = _beat_to_tick(beat)
+        if swing:
+            tick = _apply_swing(tick)
+        tick = _humanize(tick)
+        dur_ticks = int(dur * TICKS_PER_QUARTER)
+        vel = _choose_velocity(params)
+
+        notes.append(NoteEvent(
+            pitch=target,
+            start_tick=tick,
+            duration_ticks=dur_ticks,
+            velocity=vel,
+        ))
+
+        call_notes_data.append((target, dur))
+        pitch = target
+        beat += dur
+        call_played += 1
+
+    # --- Response: transform the call ---
+    if len(call_notes_data) < 2:
+        return notes, pitch, beat
+
+    # Extract intervals from call
+    call_pitches = [p for p, d in call_notes_data]
+    call_durs = [d for p, d in call_notes_data]
+    call_intervals = [call_pitches[i + 1] - call_pitches[i]
+                      for i in range(len(call_pitches) - 1)]
+
+    # Choose transform
+    transform_roll = random.random()
+    response_end = min(beat + half_beats, phrase_end)
+
+    if transform_roll < 0.4:
+        # Transpose up/down by 2-5 semitones
+        shift = random.choice([-5, -4, -3, -2, 2, 3, 4, 5])
+        resp_pitches = [max(MELODY_LOW, min(MELODY_HIGH, p + shift))
+                        for p in call_pitches]
+        resp_durs = list(call_durs)
+    elif transform_roll < 0.7:
+        # Invert intervals
+        inverted_intervals = [-iv for iv in call_intervals]
+        resp_pitches = [call_pitches[0]]
+        for iv in inverted_intervals:
+            next_p = max(MELODY_LOW, min(MELODY_HIGH, resp_pitches[-1] + iv))
+            resp_pitches.append(next_p)
+        resp_durs = list(call_durs)
+    else:
+        # Same pitches, shifted rhythmically by half a beat
+        resp_pitches = list(call_pitches)
+        resp_durs = list(call_durs)
+        beat += 0.5  # rhythmic shift
+
+    for resp_pitch, dur in zip(resp_pitches, resp_durs):
+        if beat >= response_end:
+            break
+        if beat + dur > response_end:
+            dur = response_end - beat
+            if dur <= 0:
+                break
+
+        tick = _beat_to_tick(beat)
+        if swing:
+            tick = _apply_swing(tick)
+        tick = _humanize(tick)
+        dur_ticks = int(dur * TICKS_PER_QUARTER)
+        vel = _choose_velocity(params)
+
+        notes.append(NoteEvent(
+            pitch=resp_pitch,
+            start_tick=tick,
+            duration_ticks=dur_ticks,
+            velocity=vel,
+        ))
+
+        pitch = resp_pitch
+        beat += dur
+
+    return notes, pitch, beat
+
+
+def _generate_triplet_phrase(current_beat: float, phrase_beats: float,
+                              chords: List[ChordEvent], current_pitch: int,
+                              params: MusicParams, swing: bool,
+                              coltrane: bool) -> Tuple[List[NoteEvent], int, float]:
+    """Triplet phrase: groups of 3 notes at triplet rhythm (each note = 1/3 beat).
+
+    Generates 2-4 groups (6-12 notes) of ascending or descending chord-tone runs
+    with optional rests between groups.
+
+    Returns:
+        (notes, last_pitch, beat_after_phrase)
+    """
+    notes = []
+    beat = current_beat
+    pitch = current_pitch
+    phrase_end = current_beat + phrase_beats
+
+    triplet_dur_ticks = TICKS_PER_QUARTER // 3  # 160 ticks
+    triplet_dur_beats = 1.0 / 3.0
+
+    num_groups = random.randint(2, 4)
+
+    for group_idx in range(num_groups):
+        if beat >= phrase_end:
+            break
+
+        chord = _get_chord_at_beat(chords, beat)
+        if chord is None:
+            beat += 1.0
+            continue
+
+        low = params.register_low
+        high = params.register_high
+
+        # Get chord tones for ascending/descending run
+        chord_notes = _chord_tones_in_range(chord.root_pc, chord.quality, low, high)
+        if not chord_notes:
+            beat += 1.0
+            continue
+
+        # Find starting position nearest to current pitch
+        start_note = min(chord_notes, key=lambda t: abs(t - pitch))
+        idx = chord_notes.index(start_note)
+        direction = random.choice([-1, 1])
+
+        # 3 notes per group
+        for note_i in range(3):
+            if beat + triplet_dur_beats > phrase_end:
+                break
+
+            if 0 <= idx < len(chord_notes):
+                note_midi = chord_notes[idx]
+            else:
+                direction = -direction
+                idx = max(0, min(len(chord_notes) - 1, idx))
+                note_midi = chord_notes[idx]
+
+            tick = _beat_to_tick(beat)
+            if swing:
+                tick = _apply_swing(tick)
+            tick = _humanize(tick)
+            vel = _choose_velocity(params)
+
+            notes.append(NoteEvent(
+                pitch=note_midi,
+                start_tick=tick,
+                duration_ticks=triplet_dur_ticks,
+                velocity=vel,
+            ))
+
+            pitch = note_midi
+            beat += triplet_dur_beats
+            idx += direction
+
+        # Optionally rest between groups (50% chance, 0.5 beats)
+        if group_idx < num_groups - 1 and random.random() < 0.5:
+            beat += 0.5
+
+    return notes, pitch, beat
+
+
+# ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
@@ -1064,15 +1383,59 @@ def generate_solo(chords: List[ChordEvent], total_beats: float,
                 beat, phrase_beats, chords, pitch, params, swing
             )
         elif tier == 2:
-            phrase_notes, pitch, beat = _generate_tier2_phrase(
-                beat, phrase_beats, chords, pitch, params, swing, coltrane
-            )
+            # Randomly select between motivic, pentatonic, call-response, or triplet
+            sub_type = random.choices(
+                ["motivic", "pentatonic", "call_response", "triplet"],
+                weights=[0.35, 0.25, 0.20, 0.20],
+                k=1,
+            )[0]
+            if sub_type == "pentatonic" and tension > 0.5:
+                phrase_notes, pitch, beat = _generate_pentatonic_super_phrase(
+                    beat, phrase_beats, chords, pitch, params, swing, coltrane
+                )
+            elif sub_type == "call_response":
+                phrase_notes, pitch, beat = _generate_call_response_phrase(
+                    beat, phrase_beats, chords, pitch, params, swing, coltrane
+                )
+            elif sub_type == "triplet" and tension > 0.5:
+                phrase_notes, pitch, beat = _generate_triplet_phrase(
+                    beat, phrase_beats, chords, pitch, params, swing, coltrane
+                )
+            else:
+                phrase_notes, pitch, beat = _generate_tier2_phrase(
+                    beat, phrase_beats, chords, pitch, params, swing, coltrane
+                )
         else:
             phrase_notes, pitch, beat = _generate_tier3_phrase(
                 beat, phrase_beats, chords, pitch, params, swing, coltrane
             )
 
         notes.extend(phrase_notes)
+
+        # Ghost notes: chromatic passing tones at low velocity between phrases
+        if coltrane and 0.3 < tension < 0.6 and random.random() < 0.4:
+            # Insert 1-3 ghost notes stepping chromatically toward next phrase area
+            num_ghost = random.randint(1, 3)
+            ghost_beat = beat
+            ghost_pitch = pitch
+            for _ in range(num_ghost):
+                if ghost_beat >= total_beats:
+                    break
+                # Step chromatically up or down
+                direction = random.choice([-1, 1])
+                ghost_pitch = max(MELODY_LOW, min(MELODY_HIGH, ghost_pitch + direction))
+                ghost_tick = _beat_to_tick(ghost_beat)
+                if swing:
+                    ghost_tick = _apply_swing(ghost_tick)
+                ghost_dur = TICKS_PER_16TH  # Very short
+                ghost_vel = random.randint(20, 35)  # Very quiet
+                notes.append(NoteEvent(
+                    pitch=ghost_pitch,
+                    start_tick=ghost_tick,
+                    duration_ticks=ghost_dur,
+                    velocity=ghost_vel,
+                ))
+                ghost_beat += 0.25
 
         # Rest between phrases (scaled by tension -- higher tension = shorter rests)
         if random.random() < params.rest_prob or tier == 1:

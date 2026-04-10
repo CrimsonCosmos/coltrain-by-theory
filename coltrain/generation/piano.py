@@ -196,6 +196,10 @@ def _build_voicing(root_pc: int, quality: str, voicing_type: str,
         # Close position bottom-up: root, 3rd, 5th, 7th
         # 2nd from top is 5th, drop it an octave
         pcs = [0, third, fifth, seventh]
+    elif voicing_type == "quartal":
+        # McCoy Tyner-style stacked perfect 4ths from the chord's 3rd
+        # Creates open, modern voicings characteristic of Coltrane quartet
+        pcs = [third, third + 5, third + 10, third + 15]
     else:
         pcs = [0, third, seventh]
 
@@ -316,7 +320,7 @@ def _chord_at_beat(chords, beat: float):
 
 
 def generate_comping(chords, total_beats: int, intensity: float = 0.5,
-                      swing: bool = True) -> List[NoteEvent]:
+                      swing: bool = True, coltrane: bool = False) -> List[NoteEvent]:
     """Generate piano comping voicings over a chord progression.
 
     Args:
@@ -340,9 +344,15 @@ def generate_comping(chords, total_beats: int, intensity: float = 0.5,
     if intensity < 0.3:
         voicing_type = "shell"
     elif intensity < 0.7:
-        voicing_type = random.choice(["rootless_a", "rootless_b"])
+        if coltrane and intensity > 0.5:
+            voicing_type = random.choice(["rootless_a", "rootless_b", "quartal"])
+        else:
+            voicing_type = random.choice(["rootless_a", "rootless_b"])
     else:
-        voicing_type = "drop2"
+        if coltrane:
+            voicing_type = random.choice(["drop2", "quartal"])
+        else:
+            voicing_type = "drop2"
 
     # Select pattern pool based on intensity
     if intensity < 0.3:
