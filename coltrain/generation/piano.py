@@ -4,6 +4,7 @@ Generates idiomatic jazz piano voicings with rhythmic comping patterns,
 voice leading, and intensity-dependent pattern selection.
 """
 
+import math
 import random
 from typing import List, Optional, Tuple
 
@@ -370,6 +371,8 @@ def generate_comping(chords, total_beats: int, intensity: float = 0.5,
 
     prev_voicing: List[int] = []
     prev_pattern_idx = -1
+    pattern_hold_bars = 0  # How many more bars to hold the current pattern
+    phrase_length = random.choice([4, 6, 8])  # Bars per dynamic phrase
 
     for bar_idx in range(total_bars):
         bar_start_beat = bar_idx * 4.0
@@ -377,9 +380,9 @@ def generate_comping(chords, total_beats: int, intensity: float = 0.5,
 
         # Lay-out (rest) bars: skip this bar entirely for breathing room
         if intensity < 0.4:
-            layoff_prob = 0.20
+            layoff_prob = 0.28
         elif intensity < 0.7:
-            layoff_prob = 0.10
+            layoff_prob = 0.12
         else:
             layoff_prob = 0.05
         if random.random() < layoff_prob:
@@ -400,13 +403,23 @@ def generate_comping(chords, total_beats: int, intensity: float = 0.5,
                 else:
                     voicing_type = "drop2"
 
-        # Choose a rhythm pattern — prefer variety (don't repeat last pattern)
-        available = [p for p in pattern_pool if p != prev_pattern_idx]
-        if not available:
-            available = pattern_pool
-        pattern_idx = random.choice(available)
-        prev_pattern_idx = pattern_idx
+        # Choose a rhythm pattern — phrase continuity (hold for 2-3 bars)
+        if pattern_hold_bars > 0:
+            pattern_hold_bars -= 1
+            pattern_idx = prev_pattern_idx
+        else:
+            available = [p for p in pattern_pool if p != prev_pattern_idx]
+            if not available:
+                available = pattern_pool
+            pattern_idx = random.choice(available)
+            prev_pattern_idx = pattern_idx
+            if random.random() < 0.40:
+                pattern_hold_bars = random.randint(1, 2)
         pattern = COMPING_PATTERNS[pattern_idx]
+
+        # Phrase-level dynamic contour
+        phrase_pos = (bar_idx % phrase_length) / max(1, phrase_length - 1)
+        vel_phrase_mult = 0.85 + 0.30 * math.sin(phrase_pos * math.pi)
 
         for beat_offset, duration_beats in pattern:
             abs_beat = bar_start_beat + beat_offset
@@ -432,17 +445,27 @@ def generate_comping(chords, total_beats: int, intensity: float = 0.5,
             # Slight shortening for articulation
             dur_ticks = max(TICKS_PER_16TH, dur_ticks - 30)
 
-            # Velocity: lower on beats 1 & 3, higher on 2 & 4
+            # Velocity: intensity-scaled ranges with phrase arc
+            if intensity < 0.3:
+                vel_lo, vel_hi = 50, 65
+            elif intensity < 0.6:
+                vel_lo, vel_hi = 60, 75
+            else:
+                vel_lo, vel_hi = 70, 90
+
             beat_in_bar = beat_offset
             if abs(beat_in_bar - 1.0) < 0.1 or abs(beat_in_bar - 3.0) < 0.1:
                 # On beat 2 or 4 — accent
-                base_vel = random.randint(70, 80)
+                base_vel = random.randint(vel_lo + 5, vel_hi)
             elif abs(beat_in_bar - 0.0) < 0.1 or abs(beat_in_bar - 2.0) < 0.1:
                 # On beat 1 or 3 — softer
-                base_vel = random.randint(60, 70)
+                base_vel = random.randint(max(1, vel_lo - 5), max(2, vel_hi - 8))
             else:
                 # Syncopated position
-                base_vel = random.randint(65, 75)
+                base_vel = random.randint(vel_lo, max(vel_lo + 1, vel_hi - 3))
+
+            # Apply phrase-level velocity arc
+            base_vel = max(1, min(127, round(base_vel * vel_phrase_mult)))
 
             # Emit one NoteEvent per note in the voicing, with chord spread
             # Stagger notes bottom-to-top to simulate hand roll

@@ -965,13 +965,37 @@ def generate_arrangement(
 
         _merge_tracks(tracks, section_notes)
 
-    # Post-processing: humanization
+    # Post-processing: humanization — per-section intensity for musical feel
     if humanize:
         for track_name in tracks:
             instrument = track_name  # "melody", "piano", "bass", "drums"
-            tracks[track_name] = humanize_track(
-                tracks[track_name], instrument, tempo=tempo, intensity=0.5,
+            humanized_notes: List[NoteEvent] = []
+
+            for section in arrangement:
+                sec_start = int(section.start_beat * TICKS_PER_QUARTER)
+                sec_end = int(section.end_beat * TICKS_PER_QUARTER)
+                section_notes = [
+                    n for n in tracks[track_name]
+                    if sec_start <= n.start_tick < sec_end
+                ]
+                if section_notes:
+                    humanized_notes.extend(
+                        humanize_track(section_notes, instrument,
+                                       tempo=tempo, intensity=section.intensity)
+                    )
+
+            # Safety: any notes outside defined sections
+            max_tick = max(
+                (int(s.end_beat * TICKS_PER_QUARTER) for s in arrangement),
+                default=0,
             )
+            orphans = [n for n in tracks[track_name] if n.start_tick >= max_tick]
+            if orphans:
+                humanized_notes.extend(
+                    humanize_track(orphans, instrument, tempo=tempo, intensity=0.5)
+                )
+
+            tracks[track_name] = humanized_notes
 
     # Sort all tracks by start_tick for clean output
     for track_name in tracks:

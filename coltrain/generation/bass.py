@@ -208,6 +208,93 @@ def _next_chord_at_bar(chords, bar_start_beat: float):
 
 
 # ---------------------------------------------------------------------------
+# Accent style helpers
+# ---------------------------------------------------------------------------
+
+
+def _bass_accent_style(intensity: float, bar_in_phrase: int) -> str:
+    """Choose a per-bar accent style for walking bass velocity shaping.
+
+    Styles:
+      standard  - beat 1 loud, 2&3 soft, 4 medium (traditional)
+      even      - all beats roughly equal
+      accent_3  - beat 3 accented (pulling toward next chord)
+      accent_4  - beat 4 accented (approach note emphasis)
+      soft      - everything quieter (breathing room)
+    """
+    if intensity < 0.3:
+        weights = [3, 2, 1, 0, 4]  # standard, even, accent_3, accent_4, soft
+    elif intensity < 0.6:
+        weights = [3, 3, 2, 1, 1]
+    else:
+        weights = [2, 3, 3, 2, 0]
+
+    # Bias by position in 4-bar phrase
+    if bar_in_phrase == 3:
+        weights[3] += 3   # accent_4 on turnaround bars
+    elif bar_in_phrase in (1, 2):
+        weights[2] += 2   # accent_3 in middle of phrase
+
+    styles = ["standard", "even", "accent_3", "accent_4", "soft"]
+    return random.choices(styles, weights=weights, k=1)[0]
+
+
+def _bass_velocity_for_beat(beat_idx: int, style: str, intensity: float) -> int:
+    """Return a velocity for a bass note based on accent style and intensity.
+
+    Uses intensity-scaled floor and ceiling with per-style accent fractions.
+    """
+    vel_floor = int(55 + intensity * 20)   # 55 at low, 75 at high
+    vel_ceil = int(80 + intensity * 30)    # 80 at low, 110 at high
+
+    _PATTERNS = {
+        "standard":  {0: (0.9, 1.0), 1: (0.65, 0.80), 2: (0.65, 0.80), 3: (0.70, 0.85)},
+        "even":      {0: (0.75, 0.90), 1: (0.75, 0.90), 2: (0.75, 0.90), 3: (0.75, 0.90)},
+        "accent_3":  {0: (0.70, 0.85), 1: (0.60, 0.75), 2: (0.85, 1.0), 3: (0.70, 0.85)},
+        "accent_4":  {0: (0.70, 0.85), 1: (0.60, 0.75), 2: (0.65, 0.80), 3: (0.85, 1.0)},
+        "soft":      {0: (0.60, 0.75), 1: (0.55, 0.70), 2: (0.55, 0.70), 3: (0.60, 0.75)},
+    }
+
+    lo_frac, hi_frac = _PATTERNS[style][beat_idx]
+    vel_lo = int(vel_floor + (vel_ceil - vel_floor) * lo_frac)
+    vel_hi = int(vel_floor + (vel_ceil - vel_floor) * hi_frac)
+    return random.randint(vel_lo, max(vel_lo, vel_hi))
+
+
+# ---------------------------------------------------------------------------
+# Duration helpers
+# ---------------------------------------------------------------------------
+
+TICKS_PER_16TH = TICKS_PER_QUARTER // 4
+
+
+def _bass_duration_beat1() -> int:
+    """Beat 1: mostly legato, occasionally staccato."""
+    if random.random() < 0.70:
+        return TICKS_PER_QUARTER - random.randint(5, 15)
+    return TICKS_PER_QUARTER - random.randint(40, 80)
+
+
+def _bass_duration_mid() -> int:
+    """Beats 2/3: variety from legato to detached."""
+    r = random.random()
+    if r < 0.50:
+        dur = TICKS_PER_QUARTER - random.randint(10, 30)
+    elif r < 0.85:
+        dur = TICKS_PER_QUARTER - random.randint(30, 60)
+    else:
+        dur = TICKS_PER_QUARTER - random.randint(80, 140)
+    return max(TICKS_PER_16TH, dur)
+
+
+def _bass_duration_beat4() -> int:
+    """Beat 4: mostly short approach, occasionally legato."""
+    if random.random() < 0.80:
+        return TICKS_PER_QUARTER - random.randint(20, 50)
+    return TICKS_PER_QUARTER - random.randint(5, 20)
+
+
+# ---------------------------------------------------------------------------
 # Main generators
 # ---------------------------------------------------------------------------
 
@@ -255,6 +342,12 @@ def generate_walking_bass(chords, total_beats: int, swing: bool = True,
         root_pc = chord.root_pc
         quality = chord.quality
 
+        # Per-bar accent style and rest decisions
+        accent_style = _bass_accent_style(intensity, bar_idx % 4)
+        rest_prob = max(0.02, 0.15 - intensity * 0.15)
+        drop_beat_2 = random.random() < rest_prob
+        drop_beat_3 = random.random() < rest_prob * 0.8
+
         # --- Low intensity: occasional two-feel simplification ---
         if intensity < 0.3 and random.random() < 0.30:
             beat1_midi = _nearest_bass_note(root_pc, current_midi)
@@ -262,8 +355,8 @@ def generate_walking_bass(chords, total_beats: int, swing: bool = True,
                 alt = beat1_midi + (-12 if beat1_midi > current_midi else 12)
                 if BASS_LOW <= alt <= BASS_HIGH:
                     beat1_midi = alt
-            tick1 = _humanize_tick(bar_start_tick, amount=15 if swing else 5)
-            vel1 = _humanize_velocity(random.randint(85, 100))
+            tick1 = _humanize_tick(bar_start_tick, amount=22 if swing else 8)
+            vel1 = _humanize_velocity(_bass_velocity_for_beat(0, accent_style, intensity))
             notes.append(NoteEvent(
                 pitch=beat1_midi,
                 start_tick=tick1,
@@ -279,8 +372,8 @@ def generate_walking_bass(chords, total_beats: int, swing: bool = True,
                     break
             b3_pc = (chord_beat3.root_pc + fifth_int) % 12 if random.random() < 0.5 else chord_beat3.root_pc
             beat3_midi = _nearest_bass_note(b3_pc, beat1_midi)
-            tick3 = _humanize_tick(bar_start_tick + 2 * TICKS_PER_QUARTER, amount=15 if swing else 5)
-            vel3 = _humanize_velocity(random.randint(75, 90))
+            tick3 = _humanize_tick(bar_start_tick + 2 * TICKS_PER_QUARTER, amount=22 if swing else 8)
+            vel3 = _humanize_velocity(_bass_velocity_for_beat(2, accent_style, intensity))
             notes.append(NoteEvent(
                 pitch=beat3_midi,
                 start_tick=tick3,
@@ -333,84 +426,89 @@ def generate_walking_bass(chords, total_beats: int, swing: bool = True,
                 if alt <= BASS_HIGH:
                     beat1_midi = alt
 
-        tick1 = _humanize_tick(bar_start_tick, amount=15 if swing else 5)
-        vel1 = _humanize_velocity(random.randint(85, 105))
+        tick1 = _humanize_tick(bar_start_tick, amount=22 if swing else 8)
+        vel1 = _humanize_velocity(_bass_velocity_for_beat(0, accent_style, intensity))
         notes.append(NoteEvent(
             pitch=beat1_midi,
             start_tick=tick1,
-            duration_ticks=TICKS_PER_QUARTER - random.randint(10, 25),
+            duration_ticks=_bass_duration_beat1(),
             velocity=vel1,
             channel=0,
         ))
 
         # ---- BEAT 2: Chord tone (40%), scale run (30%), chromatic (30%) ----
-        pattern_choice = random.random()
-        if pattern_choice < 0.40:
-            # Chord tone: 3rd or 5th
-            ct_candidates = [n for n in chord_tone_list
-                             if n != beat1_midi and abs(n - beat1_midi) <= 7]
-            if ct_candidates:
-                beat2_midi = random.choice(ct_candidates)
-            else:
-                beat2_midi = random.choice(chord_tone_list)
-        elif pattern_choice < 0.70:
-            # Scale run: step from beat 1 toward a target (beat 3 area)
-            # Aim for a chord tone on beat 3
-            beat3_target = _nearest_bass_note(
-                chord_beat3.root_pc, beat1_midi
-            )
-            beat2_midi = _scale_step_toward(beat1_midi, beat3_target,
-                                            root_pc, quality)
+        if drop_beat_2:
+            beat2_midi = beat1_midi  # Fallback for voice-leading continuity
         else:
-            # Chromatic step from beat 1
-            direction = random.choice([-1, 1])
-            beat2_midi = _clamp(beat1_midi + direction)
+            pattern_choice = random.random()
+            if pattern_choice < 0.40:
+                # Chord tone: 3rd or 5th
+                ct_candidates = [n for n in chord_tone_list
+                                 if n != beat1_midi and abs(n - beat1_midi) <= 7]
+                if ct_candidates:
+                    beat2_midi = random.choice(ct_candidates)
+                else:
+                    beat2_midi = random.choice(chord_tone_list)
+            elif pattern_choice < 0.70:
+                # Scale run: step from beat 1 toward a target (beat 3 area)
+                beat3_target = _nearest_bass_note(
+                    chord_beat3.root_pc, beat1_midi
+                )
+                beat2_midi = _scale_step_toward(beat1_midi, beat3_target,
+                                                root_pc, quality)
+            else:
+                # Chromatic step from beat 1
+                direction = random.choice([-1, 1])
+                beat2_midi = _clamp(beat1_midi + direction)
 
-        beat2_midi = _clamp(beat2_midi)
-        tick2 = _humanize_tick(bar_start_tick + TICKS_PER_QUARTER, amount=15 if swing else 5)
-        vel2 = _humanize_velocity(random.randint(65, 80))
-        notes.append(NoteEvent(
-            pitch=beat2_midi,
-            start_tick=tick2,
-            duration_ticks=TICKS_PER_QUARTER - random.randint(15, 40),
-            velocity=vel2,
-            channel=0,
-        ))
+            beat2_midi = _clamp(beat2_midi)
+            tick2 = _humanize_tick(bar_start_tick + TICKS_PER_QUARTER, amount=22 if swing else 8)
+            vel2 = _humanize_velocity(_bass_velocity_for_beat(1, accent_style, intensity))
+            notes.append(NoteEvent(
+                pitch=beat2_midi,
+                start_tick=tick2,
+                duration_ticks=_bass_duration_mid(),
+                velocity=vel2,
+                channel=0,
+            ))
 
         # ---- BEAT 3: Another chord tone or scale passing tone ----
-        beat3_root_pc = chord_beat3.root_pc
-        beat3_quality = chord_beat3.quality
-        beat3_ct = _chord_tones_in_range(beat3_root_pc, beat3_quality)
-
-        r3 = random.random()
-        if r3 < 0.55:
-            # Chord tone
-            ct3_candidates = [n for n in beat3_ct
-                              if n != beat2_midi and abs(n - beat2_midi) <= 7]
-            if ct3_candidates:
-                beat3_midi = random.choice(ct3_candidates)
-            elif beat3_ct:
-                beat3_midi = min(beat3_ct, key=lambda n: abs(n - beat2_midi))
-            else:
-                beat3_midi = _nearest_bass_note(beat3_root_pc, beat2_midi)
+        if drop_beat_3:
+            beat3_midi = beat2_midi  # Fallback for voice-leading continuity
         else:
-            # Scale passing tone
-            next_root_midi = _nearest_bass_note(
-                next_chord.root_pc if next_chord else root_pc, beat2_midi
-            )
-            beat3_midi = _scale_step_toward(beat2_midi, next_root_midi,
-                                            beat3_root_pc, beat3_quality)
+            beat3_root_pc = chord_beat3.root_pc
+            beat3_quality = chord_beat3.quality
+            beat3_ct = _chord_tones_in_range(beat3_root_pc, beat3_quality)
 
-        beat3_midi = _clamp(beat3_midi)
-        tick3 = _humanize_tick(bar_start_tick + 2 * TICKS_PER_QUARTER, amount=15 if swing else 5)
-        vel3 = _humanize_velocity(random.randint(65, 80))
-        notes.append(NoteEvent(
-            pitch=beat3_midi,
-            start_tick=tick3,
-            duration_ticks=TICKS_PER_QUARTER - random.randint(15, 40),
-            velocity=vel3,
-            channel=0,
-        ))
+            r3 = random.random()
+            if r3 < 0.55:
+                # Chord tone
+                ct3_candidates = [n for n in beat3_ct
+                                  if n != beat2_midi and abs(n - beat2_midi) <= 7]
+                if ct3_candidates:
+                    beat3_midi = random.choice(ct3_candidates)
+                elif beat3_ct:
+                    beat3_midi = min(beat3_ct, key=lambda n: abs(n - beat2_midi))
+                else:
+                    beat3_midi = _nearest_bass_note(chord_beat3.root_pc, beat2_midi)
+            else:
+                # Scale passing tone
+                next_root_midi = _nearest_bass_note(
+                    next_chord.root_pc if next_chord else root_pc, beat2_midi
+                )
+                beat3_midi = _scale_step_toward(beat2_midi, next_root_midi,
+                                                chord_beat3.root_pc, chord_beat3.quality)
+
+            beat3_midi = _clamp(beat3_midi)
+            tick3 = _humanize_tick(bar_start_tick + 2 * TICKS_PER_QUARTER, amount=22 if swing else 8)
+            vel3 = _humanize_velocity(_bass_velocity_for_beat(2, accent_style, intensity))
+            notes.append(NoteEvent(
+                pitch=beat3_midi,
+                start_tick=tick3,
+                duration_ticks=_bass_duration_mid(),
+                velocity=vel3,
+                channel=0,
+            ))
 
         # ---- BEAT 4: Chromatic approach to next chord's root ----
         if next_chord is not None:
@@ -427,12 +525,12 @@ def generate_walking_bass(chords, total_beats: int, swing: bool = True,
             beat4_midi = _clamp(beat4_midi + random.choice([-1, 1]))
 
         beat4_midi = _clamp(beat4_midi)
-        tick4 = _humanize_tick(bar_start_tick + 3 * TICKS_PER_QUARTER, amount=15 if swing else 5)
-        vel4 = _humanize_velocity(random.randint(70, 85))
+        tick4 = _humanize_tick(bar_start_tick + 3 * TICKS_PER_QUARTER, amount=22 if swing else 8)
+        vel4 = _humanize_velocity(_bass_velocity_for_beat(3, accent_style, intensity))
         notes.append(NoteEvent(
             pitch=beat4_midi,
             start_tick=tick4,
-            duration_ticks=TICKS_PER_QUARTER - random.randint(30, 60),
+            duration_ticks=_bass_duration_beat4(),
             velocity=vel4,
             channel=0,
         ))
