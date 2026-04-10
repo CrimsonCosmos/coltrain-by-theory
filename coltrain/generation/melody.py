@@ -114,6 +114,13 @@ class Motif:
     def transpose(self, semitones: int) -> "Motif":
         return Motif([iv + semitones for iv in self.intervals], list(self.durations))
 
+    def extend(self, extra_interval: int = 0, extra_duration: float = 0.5) -> "Motif":
+        """Append one note to the motif (cumulative extension)."""
+        last_iv = self.intervals[-1] if self.intervals else 0
+        new_intervals = list(self.intervals) + [last_iv + extra_interval]
+        new_durations = list(self.durations) + [extra_duration]
+        return Motif(new_intervals, new_durations)
+
 
 SEED_MOTIFS = [
     # Original motifs
@@ -142,16 +149,25 @@ class _SoloState:
     recent_pitches: List[int] = field(default_factory=list)
     active_motif: Optional[Motif] = None
     motif_play_count: int = 0
-    motif_max_plays: int = 3
+    motif_max_plays: int = 4
     phrase_count: int = 0
     last_phrase_length: float = 0.0
+    substitute_tones: List[int] = field(default_factory=list)
+    last_tension: float = 0.0
+    last_key_center_pc: Optional[int] = None
+    last_tier: int = 1
 
     def advance_motif(self, tension: float) -> Motif:
-        """Get next motif incarnation with successive transformations."""
+        """Get next motif with cumulative Coltrane-style development.
+
+        Sequence: original → transpose up → extend → transpose extended → diminish.
+        Each step builds on the previous, creating the repetition-with-mutation
+        that characterizes Coltrane's solo construction.
+        """
         if self.active_motif is None or self.motif_play_count >= self.motif_max_plays:
             self.active_motif = random.choice(SEED_MOTIFS)
             self.motif_play_count = 0
-            self.motif_max_plays = random.randint(2, 4)
+            self.motif_max_plays = random.randint(3, 6)
 
         count = self.motif_play_count
         self.motif_play_count += 1
@@ -160,11 +176,16 @@ class _SoloState:
         if count == 0:
             return m
         elif count == 1:
-            return m.invert()
+            # Transpose up: same shape, higher register
+            return m.transpose(random.randint(2, 5))
         elif count == 2:
-            shift = random.randint(2, 5)
-            return m.transpose(shift)
+            # Extend: add one note to the original
+            return m.extend(extra_interval=random.choice([2, 3, 4, 5, 7]))
+        elif count == 3:
+            # Transpose the extended version up
+            return m.extend(extra_interval=random.choice([2, 3, 4, 5, 7])).transpose(random.randint(3, 7))
         else:
+            # Diminish for rhythmic compression at high play counts
             return m.diminish()
 
     def record_pitch(self, p: int):
@@ -226,9 +247,16 @@ class MusicParams:
     motif_complexity: float
 
 
-def interpolate_params(tension: float) -> MusicParams:
+def interpolate_params(tension: float, coltrane: bool = False) -> MusicParams:
     """Interpolate musical parameters from a tension value in [0, 1]."""
     t = max(0.0, min(1.0, tension))
+    # Altissimo register in Coltrane mode
+    high_extreme = MELODY_HIGH_EXTREME  # default 91 (G6)
+    if coltrane:
+        if t > 0.9:
+            high_extreme = 99   # Eb7 — extreme altissimo
+        elif t > 0.8:
+            high_extreme = 96   # C7 — altissimo
     return MusicParams(
         note_density=1.0 + t * 3.0,
         chromatic_prob=t * 0.4,
@@ -236,7 +264,7 @@ def interpolate_params(tension: float) -> MusicParams:
         velocity_base=int(65 + t * 35),
         velocity_range=int(5 + t * 15),
         register_low=int(MELODY_LOW_BASE - t * (MELODY_LOW_BASE - MELODY_LOW_EXTREME)),
-        register_high=int(MELODY_HIGH_BASE + t * (MELODY_HIGH_EXTREME - MELODY_HIGH_BASE)),
+        register_high=int(MELODY_HIGH_BASE + t * (high_extreme - MELODY_HIGH_BASE)),
         motif_complexity=t,
     )
 
@@ -256,9 +284,13 @@ def _chord_tones_in_range(root_pc: int, quality: str, low: int, high: int) -> Li
     return result
 
 
-def _scale_tones_in_range(root_pc: int, quality: str, low: int, high: int) -> List[int]:
+def _scale_tones_in_range(root_pc: int, quality: str, low: int, high: int,
+                          tension: float = 0.0) -> List[int]:
     scale_names = CHORD_SCALE_MAP.get(quality, ["ionian"])
     scale_name = scale_names[0]
+    # Altered scale on dominants at high tension
+    if tension > 0.5 and quality in ("dom7", "7") and random.random() < tension * 0.3:
+        scale_name = "altered"
     intervals = SCALES.get(scale_name, SCALES["ionian"])
     interval_set = set(intervals)
     result = []
@@ -278,8 +310,8 @@ def _nearest_chord_tone(current_midi: int, root_pc: int, quality: str,
 
 
 def _nearest_scale_tone(current_midi: int, root_pc: int, quality: str,
-                        low: int, high: int) -> int:
-    tones = _scale_tones_in_range(root_pc, quality, low, high)
+                        low: int, high: int, tension: float = 0.0) -> int:
+    tones = _scale_tones_in_range(root_pc, quality, low, high, tension=tension)
     if not tones:
         return max(low, min(high, current_midi))
     return min(tones, key=lambda t: abs(t - current_midi))
@@ -328,7 +360,8 @@ def _substitute_key_tones(key_center_pc: int, low: int, high: int) -> List[int]:
 
 def _choose_target_pitch(current_pitch: int, root_pc: int, quality: str,
                          low: int, high: int, tension: float,
-                         beat_in_bar: float) -> int:
+                         beat_in_bar: float,
+                         substitute_tones: Optional[List[int]] = None) -> int:
     """Choose a target pitch with intervallic variety based on tension."""
     is_strong_beat = beat_in_bar < 0.1 or abs(beat_in_bar - 2.0) < 0.1
     chord_tones = _chord_tones_in_range(root_pc, quality, low, high)
@@ -336,6 +369,13 @@ def _choose_target_pitch(current_pitch: int, root_pc: int, quality: str,
 
     if not chord_tones:
         return max(low, min(high, current_pitch))
+
+    # Coltrane multi-tonic substitution: 30% chance when substitutes available
+    if substitute_tones and random.random() < 0.30:
+        nearby_subs = [t for t in substitute_tones
+                       if low <= t <= high and abs(t - current_pitch) <= 7]
+        if nearby_subs:
+            return random.choice(nearby_subs)
 
     roll = random.random()
 
@@ -364,7 +404,7 @@ def _choose_target_pitch(current_pitch: int, root_pc: int, quality: str,
         return min(chord_tones, key=lambda t: abs(t - target_area))
 
     # Stepwise / nearby motion (default)
-    scale_tones = _scale_tones_in_range(root_pc, quality, low, high)
+    scale_tones = _scale_tones_in_range(root_pc, quality, low, high, tension=tension)
     nearby = [t for t in set(chord_tones + scale_tones)
               if abs(t - current_pitch) <= 5 and t != current_pitch]
     if nearby:
@@ -512,8 +552,9 @@ def _chromatic_enclosure(target_midi: int) -> List[Tuple[int, float]]:
 
 
 def _scalar_run(current_midi: int, direction: int, root_pc: int, quality: str,
-                length: int, low: int, high: int) -> List[Tuple[int, float]]:
-    scale_tones = _scale_tones_in_range(root_pc, quality, low, high)
+                length: int, low: int, high: int,
+                tension: float = 0.0) -> List[Tuple[int, float]]:
+    scale_tones = _scale_tones_in_range(root_pc, quality, low, high, tension=tension)
     if not scale_tones:
         return [(current_midi, 0.5)]
     start = min(scale_tones, key=lambda t: abs(t - current_midi))
@@ -562,6 +603,30 @@ def _digital_pattern_fragment(root_pc: int, current_midi: int,
         note = root_midi + interval
         clamped = max(low, min(high, note))
         result.append((clamped, 0.5))
+    return result
+
+
+def _chromatic_run(current_midi: int, low: int, high: int,
+                   length: int = 0) -> List[Tuple[int, float]]:
+    """Generate a pure chromatic run ignoring harmony — true sheets of sound.
+
+    Picks a random direction, runs chromatically for `length` notes,
+    reversing at register boundaries. All notes are 16th-note duration.
+    """
+    if length <= 0:
+        length = random.randint(6, 12)
+    direction = random.choice([-1, 1])
+    result: List[Tuple[int, float]] = []
+    pitch = current_midi
+    for _ in range(length):
+        pitch += direction
+        if pitch > high:
+            direction = -1
+            pitch = high - 1
+        elif pitch < low:
+            direction = 1
+            pitch = low + 1
+        result.append((max(low, min(high, pitch)), 0.25))
     return result
 
 
@@ -623,7 +688,8 @@ def _generate_tier1_phrase(current_beat: float, phrase_beats: float,
             else:
                 target = _choose_target_pitch(
                     state.pitch, chord.root_pc, chord.quality,
-                    low, high, tension, beat % 4.0)
+                    low, high, tension, beat % 4.0,
+                    substitute_tones=getattr(state, 'substitute_tones', None))
 
             # Contour check
             if _contour_check(state.recent_pitches):
@@ -750,7 +816,8 @@ def _generate_tier2_phrase(current_beat: float, phrase_beats: float,
             else:
                 target = _choose_target_pitch(
                     state.pitch, chord.root_pc, chord.quality,
-                    low, high, tension, beat % 4.0)
+                    low, high, tension, beat % 4.0,
+                    substitute_tones=getattr(state, 'substitute_tones', None))
             enc_notes = _chromatic_enclosure(target)
             for note_midi, dur in enc_notes:
                 if beat + dur > phrase_end + 1e-9:
@@ -775,7 +842,7 @@ def _generate_tier2_phrase(current_beat: float, phrase_beats: float,
             if _contour_check(state.recent_pitches):
                 direction = -1 if state.recent_pitches[-1] > state.recent_pitches[-3] else 1
             length = random.randint(3, 6)
-            run = _scalar_run(state.pitch, direction, chord.root_pc, chord.quality, length, low, high)
+            run = _scalar_run(state.pitch, direction, chord.root_pc, chord.quality, length, low, high, tension=tension)
             for note_midi, dur in run:
                 if beat + dur > phrase_end + 1e-9:
                     break
@@ -837,7 +904,8 @@ def _generate_tier2_phrase(current_beat: float, phrase_beats: float,
         elif strategy == "direct":
             target = _choose_target_pitch(
                 state.pitch, chord.root_pc, chord.quality,
-                low, high, tension, beat % 4.0)
+                low, high, tension, beat % 4.0,
+                substitute_tones=getattr(state, 'substitute_tones', None))
             cell = _choose_rhythmic_cell(tension)
             dur = cell[0]
             if beat + dur > phrase_end + 1e-9:
@@ -880,10 +948,10 @@ def _generate_tier3_phrase(current_beat: float, phrase_beats: float,
     beat = current_beat
     phrase_end = current_beat + phrase_beats
 
-    strategies = ["digital", "rapid_arpeggio", "enclosure_run"]
-    weights = [0.40, 0.30, 0.30]
+    strategies = ["digital", "rapid_arpeggio", "enclosure_run", "chromatic_run"]
+    weights = [0.35, 0.25, 0.25, 0.15]
     if coltrane:
-        weights = [0.50, 0.30, 0.20]
+        weights = [0.30, 0.20, 0.15, 0.35]
 
     vel_base = max(90, params.velocity_base)
     vel_range = params.velocity_range
@@ -1000,6 +1068,25 @@ def _generate_tier3_phrase(current_beat: float, phrase_beats: float,
                     state.record_pitch(ep_clamped)
                     beat += dur
 
+        elif strategy == "chromatic_run":
+            run = _chromatic_run(state.pitch, low, high)
+            for note_midi, dur in run:
+                if beat + dur > phrase_end + 1e-9:
+                    break
+                tick = _beat_to_tick(beat)
+                if swing:
+                    tick = _apply_swing(tick)
+                tick = _humanize(tick, amount=5)
+                dur_ticks = max(30, int(dur * TICKS_PER_QUARTER))
+                vel = min(127, max(1, vel_base + random.randint(-vel_range, vel_range)))
+                notes.append(NoteEvent(
+                    pitch=note_midi, start_tick=tick,
+                    duration_ticks=dur_ticks, velocity=vel,
+                ))
+                state.pitch = note_midi
+                state.record_pitch(note_midi)
+                beat += dur
+
         # Stall guard: if no progress was made, advance to end
         if beat <= beat_before + 1e-9:
             beat = phrase_end
@@ -1114,7 +1201,8 @@ def _generate_call_response_phrase(current_beat: float, phrase_beats: float,
         high = params.register_high
         target = _choose_target_pitch(
             state.pitch, chord.root_pc, chord.quality,
-            low, high, tension, beat % 4.0)
+            low, high, tension, beat % 4.0,
+            substitute_tones=getattr(state, 'substitute_tones', None))
 
         cell = _choose_rhythmic_cell(tension)
         dur = cell[0]
@@ -1364,7 +1452,23 @@ def generate_solo(chords: List[ChordEvent], total_beats: float,
     while beat < total_beats:
         progress = beat / total_beats if total_beats > 0 else 0.0
         tension = curve(progress)
-        params = interpolate_params(tension)
+
+        # Fix 6b: Structural silence at tension transitions
+        tension_delta = tension - state.last_tension
+        if state.phrase_count > 0:
+            if tension_delta > 0.15 and random.random() < 0.5:
+                # Breath before escalation — dramatic pause
+                beat += random.choice([2.0, 3.0, 4.0])
+                state.last_tension = tension
+                continue
+            elif tension_delta < -0.2 and random.random() < 0.4:
+                # Brief pause on de-escalation
+                beat += random.choice([1.0, 2.0])
+                state.last_tension = tension
+                continue
+        state.last_tension = tension
+
+        params = interpolate_params(tension, coltrane=coltrane)
 
         # Smooth tier selection with probability blending
         tier = _select_tier(tension)
@@ -1397,13 +1501,16 @@ def generate_solo(chords: List[ChordEvent], total_beats: float,
         if phrase_beats < 0.5:
             break
 
-        # Coltrane mode: key center awareness
+        # Coltrane mode: key center awareness — populate substitute tones
         if coltrane:
             chord = _get_chord_at_beat(chords, beat)
             if chord is not None and chord.key_center_pc != chord.root_pc:
-                _substitute_key_tones(chord.key_center_pc,
-                                      params.register_low,
-                                      params.register_high)
+                state.substitute_tones = _substitute_key_tones(
+                    chord.key_center_pc,
+                    params.register_low,
+                    params.register_high)
+            else:
+                state.substitute_tones = []
 
         # Generate phrase based on tier
         if tier == 1:
@@ -1432,6 +1539,10 @@ def generate_solo(chords: List[ChordEvent], total_beats: float,
         notes.extend(phrase_notes)
         state.phrase_count += 1
 
+        # Fix 5: Rhythmic displacement — push phrase endings offbeat
+        if tension > 0.4 and random.random() < (0.15 + tension * 0.20):
+            beat += random.choice([0.25, 0.5])
+
         # Ghost notes (Coltrane mode)
         if coltrane and 0.3 < tension < 0.6 and random.random() < 0.4:
             num_ghost = random.randint(1, 3)
@@ -1453,15 +1564,35 @@ def generate_solo(chords: List[ChordEvent], total_beats: float,
                 ))
                 ghost_beat += 0.25
 
-        # Rest between phrases -- varied by tier
-        if random.random() < params.rest_prob or tier == 1:
+        # Fix 7: Strategic rests (compositional silence)
+        rest_dur = 0.0
+        current_chord = _get_chord_at_beat(chords, beat)
+        current_kc = current_chord.key_center_pc if current_chord else None
+
+        # (a) Before key center changes — breath at harmonic boundaries
+        if (state.last_key_center_pc is not None and current_kc is not None
+                and current_kc != state.last_key_center_pc
+                and random.random() < 0.6):
+            rest_dur = random.choice([1.0, 1.5])
+        # (b) After tier 3 phrase — brief breath to reset
+        elif state.last_tier == 3 and tier < 3 and random.random() < 0.4:
+            rest_dur = random.choice([0.5, 1.0])
+        # (c) Before climax — dramatic silence
+        elif (tension > 0.85 and state.last_tension < 0.7
+              and random.random() < 0.5):
+            rest_dur = random.choice([2.0, 3.0])
+        # (d) Fallback: original random rest probability
+        elif random.random() < params.rest_prob or tier == 1:
             if tier == 3:
                 rest_dur = random.choice([0.25, 0.5])
             elif tier == 2:
                 rest_dur = random.choice([0.5, 1.0, 1.5])
             else:
                 rest_dur = random.choice([1.0, 1.5, 2.0, 4.0])
-            beat += rest_dur
+
+        beat += rest_dur
+        state.last_key_center_pc = current_kc
+        state.last_tier = tier
 
     notes.sort(key=lambda n: n.start_tick)
     return notes
