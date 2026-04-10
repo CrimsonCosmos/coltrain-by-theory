@@ -305,3 +305,73 @@ def generate_drums(total_beats: int, intensity: float = 0.5,
             notes.extend(_generate_snare_comping(bar_start_tick, intensity, swing))
 
     return notes
+
+
+def generate_modal_drums(total_beats: int, intensity: float = 0.5,
+                         swing: bool = True, fill_every: int = 8) -> List[NoteEvent]:
+    """Generate a modal/Elvin Jones-influenced drum pattern.
+
+    Sparse ride (hit on ~70% of positions), floor tom coloring on beats 2&4
+    instead of hi-hat, more open feel. Used for modal jazz.
+    """
+    intensity = max(0.0, min(1.0, intensity))
+    total_bars = total_beats // 4
+    notes: List[NoteEvent] = []
+    need_crash = False
+
+    for bar_idx in range(total_bars):
+        bar_start_tick = bar_idx * TICKS_PER_BAR
+
+        is_fill_bar = (
+            fill_every > 0
+            and bar_idx > 0
+            and (bar_idx + 1) % fill_every == 0
+            and bar_idx < total_bars - 1
+        )
+
+        if need_crash:
+            tick = _swing_tick(bar_start_tick, 0.0, swing)
+            vel = _humanize_velocity(random.randint(100, 115))
+            notes.append(_drum_note(CRASH, _humanize_tick(tick, 3), TICKS_PER_QUARTER, vel))
+            need_crash = False
+
+        if is_fill_bar:
+            fill_func = random.choice(_FILL_FUNCTIONS)
+            notes.extend(fill_func(bar_start_tick, swing))
+            need_crash = True
+        else:
+            # Sparse ride: only ~70% of standard positions
+            for beat in [0.0, 2.0]:
+                if random.random() < 0.70:
+                    tick = _swing_tick(bar_start_tick, beat, swing)
+                    vel = _humanize_velocity(random.randint(80, 95))
+                    notes.append(_drum_note(RIDE, _humanize_tick(tick, 5), TICKS_PER_8TH, vel))
+
+            for beat in [1.5, 3.5]:
+                if random.random() < 0.70:
+                    tick = _swing_tick(bar_start_tick, beat, swing)
+                    vel = _humanize_velocity(random.randint(70, 80))
+                    notes.append(_drum_note(RIDE, _humanize_tick(tick, 8), TICKS_PER_8TH, vel))
+
+            # Floor tom on beats 2 and 4 (instead of hi-hat)
+            for beat in [1.0, 3.0]:
+                if random.random() < 0.60:
+                    tick = _swing_tick(bar_start_tick, beat, swing)
+                    vel = _humanize_velocity(random.randint(45, 60))
+                    notes.append(_drum_note(FLOOR_TOM, _humanize_tick(tick, 8), TICKS_PER_8TH, vel))
+
+            # Occasional kick — sparser than swing
+            for beat_idx in range(4):
+                if random.random() < 0.25:
+                    tick = _swing_tick(bar_start_tick, float(beat_idx), swing)
+                    vel = _humanize_velocity(random.randint(30, 50))
+                    notes.append(_drum_note(KICK, _humanize_tick(tick, 8), TICKS_PER_QUARTER, vel))
+
+            # Occasional snare ghost note — very sparse
+            if random.random() < 0.3 * intensity:
+                beat = random.choice([0.5, 1.5, 2.5, 3.5])
+                tick = _swing_tick(bar_start_tick, beat, swing)
+                vel = _humanize_velocity(random.randint(35, 50))
+                notes.append(_drum_note(SNARE, _humanize_tick(tick, 10), TICKS_PER_8TH, vel))
+
+    return notes

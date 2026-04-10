@@ -60,7 +60,7 @@ def parse_args(argv=None):
     )
     parser.add_argument(
         "--tension",
-        choices=["arc", "build", "wave"],
+        choices=["arc", "build", "wave", "plateau", "catharsis"],
         default="arc",
         help="Tension curve shape for solos (default: arc)",
     )
@@ -96,6 +96,34 @@ def parse_args(argv=None):
         "--chart",
         action="store_true",
         help="Also write a chord chart text file alongside the MIDI",
+    )
+    parser.add_argument(
+        "--no-humanize",
+        action="store_true",
+        help="Disable post-processing humanization (timing/velocity micro-variations)",
+    )
+    parser.add_argument(
+        "--ghost-notes",
+        action="store_true",
+        help="Enable ghost notes between solo phrases (auto-enabled by --coltrane)",
+    )
+    parser.add_argument(
+        "--reharmonize",
+        choices=["off", "light", "medium", "heavy"],
+        default="off",
+        help="Coltrane reharmonization density for solo sections (default: off)",
+    )
+    parser.add_argument(
+        "--bass-style",
+        choices=["walking", "modal"],
+        default="walking",
+        help="Bass line style (default: walking)",
+    )
+    parser.add_argument(
+        "--drum-style",
+        choices=["swing", "modal"],
+        default="swing",
+        help="Drum pattern style (default: swing)",
     )
 
     return parser.parse_args(argv)
@@ -144,6 +172,13 @@ def main(argv=None):
         coltrane=args.coltrane,
     )
 
+    # Coltrane defaults: auto-enable certain features
+    reharmonize_density = args.reharmonize
+    if args.coltrane and reharmonize_density == "off":
+        reharmonize_density = "medium"
+
+    do_humanize = not args.no_humanize
+
     # Print summary
     print(f"\nColtrain By Theory")
     print(f"{'=' * 50}")
@@ -154,6 +189,11 @@ def main(argv=None):
     print(f"  Tension:    {args.tension}")
     print(f"  Instrument: {args.instrument}")
     print(f"  Swing:      {args.swing:.3f}")
+    print(f"  Bass:       {args.bass_style}")
+    print(f"  Drums:      {args.drum_style}")
+    print(f"  Humanize:   {'on' if do_humanize else 'off'}")
+    if reharmonize_density != "off":
+        print(f"  Reharmonize: {reharmonize_density}")
     if args.coltrane:
         print(f"  Coltrane:   enabled")
     if args.seed is not None:
@@ -172,8 +212,13 @@ def main(argv=None):
         key_pc=key_pc,
         tension_curve=args.tension,
         coltrane=args.coltrane,
-        swing=(args.swing >= 0.55),  # Swing feel if ratio > 0.55
+        swing=(args.swing >= 0.55),
         seed=args.seed,
+        humanize=do_humanize,
+        tempo=tempo,
+        bass_style=args.bass_style,
+        drum_style=args.drum_style,
+        reharmonize_density=reharmonize_density,
     )
 
     # Count total notes
