@@ -12,9 +12,9 @@ from coltrain.generation import NoteEvent, TICKS_PER_QUARTER, TICKS_PER_BAR
 # ---------------------------------------------------------------------------
 
 GROOVE_PROFILES = {
-    "drums":  {"timing_ms": 8.0,  "velocity_var": 12, "anticipate_ms": 0},
-    "bass":   {"timing_ms": 15.0, "velocity_var": 14, "anticipate_ms": -8},
-    "piano":  {"timing_ms": 18.0, "velocity_var": 16, "anticipate_ms": 5},
+    "drums":  {"timing_ms": 14.0, "velocity_var": 12, "anticipate_ms": 0},
+    "bass":   {"timing_ms": 22.0, "velocity_var": 16, "anticipate_ms": -8},
+    "piano":  {"timing_ms": 25.0, "velocity_var": 16, "anticipate_ms": 5},
     "melody": {"timing_ms": 22.0, "velocity_var": 18, "anticipate_ms": 8},
 }
 

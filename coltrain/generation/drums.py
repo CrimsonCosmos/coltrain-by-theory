@@ -112,8 +112,10 @@ def _generate_ride(bar_start_tick: int, swing: bool,
         vel = _humanize_velocity(round(random.randint(80, 110) * vel_mult))
         notes.append(_drum_note(RIDE, _humanize_tick(tick, 10), TICKS_PER_8TH, vel))
 
-    # And-of-2 and and-of-4 — the swing pattern
+    # And-of-2 and and-of-4 — the swing pattern (occasional drops for space)
     for beat in [1.5, 3.5]:
+        if random.random() < 0.15:
+            continue  # Drop this swing hit — creates tension/space
         tick = _swing_tick(bar_start_tick, beat, swing)
         vel = _humanize_velocity(round(random.randint(60, 85) * vel_mult))
         notes.append(_drum_note(RIDE, _humanize_tick(tick, 18), TICKS_PER_8TH, vel))
@@ -136,56 +138,121 @@ def _generate_ride(bar_start_tick: int, swing: bool,
 
 
 def _generate_hihat(bar_start_tick: int, swing: bool,
-                    vel_mult: float = 1.0) -> List[NoteEvent]:
-    """Generate hi-hat pedal on beats 2 and 4 (the standard jazz hi-hat pattern)."""
+                    intensity: float = 0.5, vel_mult: float = 1.0) -> List[NoteEvent]:
+    """Generate hi-hat pedal with musical variation.
+
+    Base pattern: beats 2 and 4.
+    Variations: skip (10%), open hat (5%), extra hit on and-of-2/4 (8%).
+    """
     notes = []
     for beat in [1.0, 3.0]:
+        # 10% chance to skip this hit
+        if random.random() < 0.10:
+            continue
+
+        # 5% chance of open hi-hat instead of closed
+        if random.random() < 0.05:
+            pitch = OPEN_HH
+            vel = _humanize_velocity(round(random.randint(55, 70) * vel_mult))
+            dur = TICKS_PER_QUARTER
+        else:
+            pitch = CLOSED_HH
+            vel = _humanize_velocity(round(random.randint(50, 60) * vel_mult))
+            dur = TICKS_PER_8TH
+
         tick = _swing_tick(bar_start_tick, beat, swing)
-        vel = _humanize_velocity(round(random.randint(50, 60) * vel_mult))
-        notes.append(_drum_note(CLOSED_HH, _humanize_tick(tick, 8), TICKS_PER_8TH, vel))
+        notes.append(_drum_note(pitch, _humanize_tick(tick, 8), dur, vel))
+
+        # 8% chance of extra hit on the "and" (adds shuffle feel)
+        if random.random() < 0.08:
+            and_beat = beat + 0.5
+            and_tick = _swing_tick(bar_start_tick, and_beat, swing)
+            and_vel = _humanize_velocity(round(random.randint(35, 50) * vel_mult))
+            notes.append(_drum_note(CLOSED_HH, _humanize_tick(and_tick, 10),
+                                    TICKS_PER_8TH, and_vel))
+
     return notes
 
 
-def _generate_kick(bar_start_tick: int, intensity: float, swing: bool) -> List[NoteEvent]:
-    """Generate feathered bass drum pattern.
+_KICK_PATTERNS = [
+    [(0.0, True)],                                # Just beat 1
+    [(0.0, True), (2.0, False)],                   # Beats 1 & 3
+    [(0.0, True), (1.5, False)],                   # Beat 1 + and-of-2
+    [(0.0, True), (2.5, False), (3.0, False)],     # Beat 1 + syncopated cluster
+    [(0.0, True), (1.0, False), (3.0, False)],     # Beats 1, 2, 4
+    [(2.0, False), (3.5, False)],                  # Anticipation pattern
+    [(0.0, True), (1.5, False), (3.0, False)],     # Beat 1 + cross-rhythm
+]
 
-    Ghost notes on all 4 beats with intensity-dependent probability.
-    Occasional accent on beat 1.
+
+def _generate_kick(bar_start_tick: int, intensity: float, swing: bool,
+                   vel_mult: float = 1.0) -> List[NoteEvent]:
+    """Generate bass drum pattern using musical kick patterns.
+
+    Instead of uniform probability on every beat, choose from pre-defined
+    syncopated patterns that create musical groupings.
     """
     notes = []
-    # Probability of ghost note scales with intensity: 40% at low, 80% at high
-    ghost_prob = 0.4 + intensity * 0.4
 
-    for beat_idx in range(4):
-        beat = float(beat_idx)
-        tick = _swing_tick(bar_start_tick, beat, swing)
+    # At low intensity, pick sparser patterns; at high, denser
+    if intensity < 0.3:
+        pool = _KICK_PATTERNS[:2]
+    elif intensity < 0.6:
+        pool = _KICK_PATTERNS[:5]
+    else:
+        pool = _KICK_PATTERNS
 
-        if beat_idx == 0 and random.random() < 0.30:
-            # Accented beat 1
-            vel = _humanize_velocity(random.randint(70, 80))
-            notes.append(_drum_note(KICK, _humanize_tick(tick, 5), TICKS_PER_QUARTER, vel))
-        elif random.random() < ghost_prob:
-            # Ghost note — very soft
-            vel = _humanize_velocity(random.randint(30, 45))
-            notes.append(_drum_note(KICK, _humanize_tick(tick, 8), TICKS_PER_QUARTER, vel))
+    # Chance of no kick at all (more likely at low intensity)
+    silence_prob = max(0.05, 0.35 - intensity * 0.35)
+    if random.random() < silence_prob:
+        return notes
+
+    pattern = random.choice(pool)
+    for beat_offset, is_accent in pattern:
+        tick = _swing_tick(bar_start_tick, beat_offset, swing)
+        if is_accent:
+            vel = _humanize_velocity(round(random.randint(65, 80) * vel_mult))
+        else:
+            vel = _humanize_velocity(round(random.randint(30, 50) * vel_mult))
+        notes.append(_drum_note(KICK, _humanize_tick(tick, 8), TICKS_PER_QUARTER, vel))
 
     return notes
 
 
 def _generate_snare_comping(bar_start_tick: int, intensity: float,
-                             swing: bool) -> List[NoteEvent]:
-    """Generate syncopated snare/cross-stick comping hits.
+                             swing: bool, prev_positions: list = None,
+                             vel_mult: float = 1.0):
+    """Generate syncopated snare/cross-stick comping hits with phrase memory.
 
     Number of hits per bar scales with intensity (1-4).
-    Positions chosen from typical jazz syncopations.
+    40% chance to repeat similar placement from previous bar.
+
+    Returns:
+        Tuple of (notes, chosen_positions) for phrase memory.
     """
     notes = []
     num_hits = int(1 + intensity * 3)
 
     # Available syncopated positions (beat offsets within bar)
-    positions = [0.5, 1.0, 1.5, 2.5, 3.0, 3.5]
-    random.shuffle(positions)
-    chosen_positions = sorted(positions[:num_hits])
+    all_positions = [0.5, 1.0, 1.5, 2.5, 3.0, 3.5]
+
+    if prev_positions and random.random() < 0.40:
+        # Repeat similar placement from last bar (phrase continuity)
+        chosen_positions = []
+        for pos in prev_positions:
+            varied = pos + random.choice([-0.5, 0.0, 0.0, 0.5])
+            if varied in all_positions and varied not in chosen_positions:
+                chosen_positions.append(varied)
+        # Fill remaining from pool
+        remaining = [p for p in all_positions if p not in chosen_positions]
+        while len(chosen_positions) < num_hits and remaining:
+            pick = random.choice(remaining)
+            chosen_positions.append(pick)
+            remaining.remove(pick)
+        chosen_positions = sorted(chosen_positions[:num_hits])
+    else:
+        random.shuffle(all_positions)
+        chosen_positions = sorted(all_positions[:num_hits])
 
     for beat in chosen_positions:
         tick = _swing_tick(bar_start_tick, beat, swing)
@@ -196,10 +263,10 @@ def _generate_snare_comping(bar_start_tick: int, intensity: float,
         else:
             pitch = SNARE
 
-        vel = _humanize_velocity(random.randint(55, 75))
+        vel = _humanize_velocity(round(random.randint(55, 75) * vel_mult))
         notes.append(_drum_note(pitch, _humanize_tick(tick, 15), TICKS_PER_8TH, vel))
 
-    return notes
+    return notes, chosen_positions
 
 
 # ---------------------------------------------------------------------------
@@ -261,7 +328,55 @@ def _fill_buildup(bar_start_tick: int, swing: bool) -> List[NoteEvent]:
     return notes
 
 
-_FILL_FUNCTIONS = [_fill_descending_toms, _fill_snare_roll, _fill_buildup]
+def _fill_triplet_toms(bar_start_tick: int, swing: bool) -> List[NoteEvent]:
+    """Triplet fill across toms — jazz 12/8 feel."""
+    notes = []
+    toms = [HI_TOM, MID_TOM, LO_TOM]
+    triplet_dur = TICKS_PER_QUARTER // 3
+    for i in range(12):  # 4 beats x 3 triplets
+        beat_offset = i / 3.0
+        tick = bar_start_tick + int(beat_offset * TICKS_PER_QUARTER)
+        tom = toms[i % 3]
+        vel_base = 60 + int(45 * (i / 11))
+        notes.append(_drum_note(tom, _humanize_tick(tick, 5), triplet_dur,
+                                _humanize_velocity(vel_base)))
+    return notes
+
+
+def _fill_single_stroke_roll(bar_start_tick: int, swing: bool) -> List[NoteEvent]:
+    """Alternating snare single-stroke roll: 8ths accelerating to 16ths."""
+    notes = []
+    # First 2 beats: 8th notes
+    for i in range(4):
+        tick = bar_start_tick + int(i * 0.5 * TICKS_PER_QUARTER)
+        notes.append(_drum_note(SNARE, _humanize_tick(tick, 3), TICKS_PER_8TH,
+                                _humanize_velocity(65 + i * 5)))
+    # Last 2 beats: 16th notes
+    for i in range(8):
+        tick = bar_start_tick + 2 * TICKS_PER_QUARTER + int(i * 0.25 * TICKS_PER_QUARTER)
+        notes.append(_drum_note(SNARE, _humanize_tick(tick, 3), TICKS_PER_16TH,
+                                _humanize_velocity(80 + i * 4)))
+    return notes
+
+
+def _fill_sparse_accents(bar_start_tick: int, swing: bool) -> List[NoteEvent]:
+    """Sparse fill: just 3-4 big accents with space. Musical restraint."""
+    notes = []
+    num_accents = random.randint(3, 4)
+    accent_beats = sorted(random.sample([0.0, 1.0, 1.5, 2.0, 3.0, 3.5], k=num_accents))
+    drums_pool = [SNARE, FLOOR_TOM, HI_TOM, MID_TOM]
+    for beat in accent_beats:
+        tick = _swing_tick(bar_start_tick, beat, swing)
+        drum = random.choice(drums_pool)
+        notes.append(_drum_note(drum, _humanize_tick(tick, 5), TICKS_PER_8TH,
+                                _humanize_velocity(random.randint(85, 110))))
+    return notes
+
+
+_FILL_FUNCTIONS = [
+    _fill_descending_toms, _fill_snare_roll, _fill_buildup,
+    _fill_triplet_toms, _fill_single_stroke_roll, _fill_sparse_accents,
+]
 
 
 # ---------------------------------------------------------------------------
@@ -293,13 +408,14 @@ def generate_drums(total_beats: int, intensity: float = 0.5,
 
     # Dynamic arc: sine-wave velocity multiplier over 8-16 bar cycles
     arc_period = random.choice([8, 12, 16])
+    prev_snare_positions: list = []
 
     for bar_idx in range(total_bars):
         bar_start_tick = bar_idx * TICKS_PER_BAR
 
-        # Dynamic arc: ±10% velocity wave
+        # Dynamic arc: ±20% velocity wave
         arc_phase = (bar_idx % arc_period) / arc_period
-        vel_mult = 1.0 + 0.10 * math.sin(arc_phase * 2 * math.pi)
+        vel_mult = 1.0 + 0.20 * math.sin(arc_phase * 2 * math.pi)
 
         # Check if this bar should be a fill
         is_fill_bar = (
@@ -324,9 +440,11 @@ def generate_drums(total_beats: int, intensity: float = 0.5,
         else:
             # Normal bar: layer all components with dynamic arc
             notes.extend(_generate_ride(bar_start_tick, swing, intensity, vel_mult))
-            notes.extend(_generate_hihat(bar_start_tick, swing, vel_mult))
-            notes.extend(_generate_kick(bar_start_tick, intensity, swing))
-            notes.extend(_generate_snare_comping(bar_start_tick, intensity, swing))
+            notes.extend(_generate_hihat(bar_start_tick, swing, intensity, vel_mult))
+            notes.extend(_generate_kick(bar_start_tick, intensity, swing, vel_mult))
+            snare_notes, prev_snare_positions = _generate_snare_comping(
+                bar_start_tick, intensity, swing, prev_snare_positions, vel_mult)
+            notes.extend(snare_notes)
 
     return notes
 
