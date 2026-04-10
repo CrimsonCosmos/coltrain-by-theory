@@ -99,7 +99,7 @@ def sanitize_filename(title):
 
 FORMS = ["blues12", "blues_bird", "rhythm_changes", "aaba32", "giantsteps"]
 KEYS = ["C", "Db", "D", "Eb", "E", "F", "Gb", "G", "Ab", "A", "Bb", "B"]
-INSTRUMENTS = ["sax", "trumpet", "piano"]
+INSTRUMENTS = ["trumpet", "piano"]
 TENSIONS = ["arc", "build", "wave", "plateau", "catharsis"]
 REHARMONIZE_LEVELS = ["off", "light", "medium", "heavy"]
 
