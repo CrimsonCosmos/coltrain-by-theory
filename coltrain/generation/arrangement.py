@@ -502,9 +502,9 @@ def _generate_intro(
         drum_notes = generate_drums(beats, intensity=0.2, swing=swing, fill_every=0)
     piano_notes = generate_comping(section_chords, beats, intensity=0.2, swing=swing)
 
-    _offset_notes(bass_notes, tick_offset)
-    _offset_notes(drum_notes, tick_offset)
-    _offset_notes(piano_notes, tick_offset)
+    _offset_notes(bass_notes, int(tick_offset))
+    _offset_notes(drum_notes, int(tick_offset))
+    _offset_notes(piano_notes, int(tick_offset))
 
     return {
         "melody": [],
@@ -531,7 +531,8 @@ def _generate_head(
     if bass_style == "modal":
         bass_notes = generate_modal_bass(section_chords, beats, swing=swing)
     else:
-        bass_notes = generate_walking_bass(section_chords, beats, swing=swing)
+        bass_notes = generate_walking_bass(section_chords, beats, swing=swing,
+                                           intensity=section.intensity)
     if drum_style == "modal":
         drum_notes = generate_modal_drums(beats, intensity=section.intensity, swing=swing, fill_every=8)
     else:
@@ -539,10 +540,10 @@ def _generate_head(
     piano_notes = generate_comping(section_chords, beats, intensity=section.intensity,
                                    swing=swing, coltrane=coltrane)
 
-    _offset_notes(melody_notes, tick_offset)
-    _offset_notes(bass_notes, tick_offset)
-    _offset_notes(drum_notes, tick_offset)
-    _offset_notes(piano_notes, tick_offset)
+    _offset_notes(melody_notes, int(tick_offset))
+    _offset_notes(bass_notes, int(tick_offset))
+    _offset_notes(drum_notes, int(tick_offset))
+    _offset_notes(piano_notes, int(tick_offset))
 
     return {
         "melody": melody_notes,
@@ -585,7 +586,8 @@ def _generate_solo_section(
     if bass_style == "modal":
         bass_notes = generate_modal_bass(section_chords, beats, swing=swing)
     else:
-        bass_notes = generate_walking_bass(section_chords, beats, swing=swing)
+        bass_notes = generate_walking_bass(section_chords, beats, swing=swing,
+                                           intensity=scaled_intensity)
     if drum_style == "modal":
         drum_notes = generate_modal_drums(
             beats, intensity=scaled_intensity, swing=swing,
@@ -601,10 +603,10 @@ def _generate_solo_section(
         coltrane=coltrane,
     )
 
-    _offset_notes(melody_notes, tick_offset)
-    _offset_notes(bass_notes, tick_offset)
-    _offset_notes(drum_notes, tick_offset)
-    _offset_notes(piano_notes, tick_offset)
+    _offset_notes(melody_notes, int(tick_offset))
+    _offset_notes(bass_notes, int(tick_offset))
+    _offset_notes(drum_notes, int(tick_offset))
+    _offset_notes(piano_notes, int(tick_offset))
 
     return {
         "melody": melody_notes,
@@ -637,7 +639,8 @@ def _generate_trading_section(
     if bass_style == "modal":
         bass_notes = generate_modal_bass(section_chords, beats, swing=swing)
     else:
-        bass_notes = generate_walking_bass(section_chords, beats, swing=swing)
+        bass_notes = generate_walking_bass(section_chords, beats, swing=swing,
+                                           intensity=section.intensity)
     piano_notes = generate_comping(
         section_chords, beats, intensity=section.intensity, swing=swing,
     )
@@ -646,10 +649,10 @@ def _generate_trading_section(
     # and normal pattern during melody bars (bars 1-4)
     drum_notes = _generate_trading_drums(beats, section.intensity, swing)
 
-    _offset_notes(melody_notes, tick_offset)
-    _offset_notes(bass_notes, tick_offset)
-    _offset_notes(drum_notes, tick_offset)
-    _offset_notes(piano_notes, tick_offset)
+    _offset_notes(melody_notes, int(tick_offset))
+    _offset_notes(bass_notes, int(tick_offset))
+    _offset_notes(drum_notes, int(tick_offset))
+    _offset_notes(piano_notes, int(tick_offset))
 
     return {
         "melody": melody_notes,
@@ -745,7 +748,7 @@ def _generate_coda(
             bars_done += seg_bars
             continue
 
-        seg_tick_offset = (section.start_beat + bars_done * 4) * TICKS_PER_QUARTER
+        seg_tick_offset = int((section.start_beat + bars_done * 4) * TICKS_PER_QUARTER)
 
         # Two-feel bass for ritardando feel
         b = generate_two_feel_bass(seg_chords, seg_beats, swing=swing)
@@ -754,12 +757,12 @@ def _generate_coda(
 
         # Sparse drums, no fills
         d = generate_drums(seg_beats, intensity=seg_intensity, swing=swing, fill_every=0)
-        _offset_notes(d, seg_tick_offset)
+        _offset_notes(d, int(seg_tick_offset))
         drum_notes.extend(d)
 
         # Sparse piano
         p = generate_comping(seg_chords, seg_beats, intensity=seg_intensity, swing=swing)
-        _offset_notes(p, seg_tick_offset)
+        _offset_notes(p, int(seg_tick_offset))
         piano_notes.extend(p)
 
         bars_done += seg_bars
@@ -772,7 +775,7 @@ def _generate_coda(
         final_pitch = 60 + final_root  # Middle-ish register
         if final_pitch > 84:
             final_pitch -= 12
-        final_tick = tick_offset + max(0, (beats - 8)) * TICKS_PER_QUARTER
+        final_tick = int(tick_offset + max(0, (beats - 8)) * TICKS_PER_QUARTER)
         melody_notes.append(NoteEvent(
             pitch=final_pitch,
             start_tick=final_tick,
@@ -780,6 +783,17 @@ def _generate_coda(
             velocity=75,
             channel=0,
         ))
+
+    # Fermata: double the last bass note's duration and sustain last piano chord
+    if bass_notes:
+        bass_notes[-1].duration_ticks *= 2
+    if piano_notes:
+        # Sustain the last few piano notes (the final chord voicing)
+        last_tick = piano_notes[-1].start_tick
+        for n in reversed(piano_notes):
+            if n.start_tick < last_tick - 30:
+                break
+            n.duration_ticks = 4 * TICKS_PER_QUARTER  # Hold for a full bar
 
     return {
         "melody": melody_notes,

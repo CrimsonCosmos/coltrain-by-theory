@@ -74,15 +74,21 @@ COMPING_PATTERNS = [
     [(1.0, 2.0)],
     # Pattern 5 - Dense
     [(0.0, 0.5), (1.0, 0.5), (2.0, 0.5), (3.0, 0.5)],
-    # Pattern 6 - Freddie Green
-    [(0.0, 0.5), (1.0, 0.5), (2.0, 0.5), (3.0, 0.5)],
+    # Pattern 6 - Freddie Green (4-on-the-floor quarters)
+    [(0.0, 1.0), (1.0, 1.0), (2.0, 1.0), (3.0, 1.0)],
+    # Pattern 7 - Anticipation push (hits before barline area)
+    [(3.5, 1.5), (1.5, 0.5)],
+    # Pattern 8 - Dotted rhythm
+    [(0.0, 1.5), (1.5, 0.5), (3.0, 1.0)],
+    # Pattern 9 - Space (single hit on beat 3)
+    [(2.0, 2.0)],
 ]
 
 # Which patterns to use at each intensity range
 PATTERNS_BY_INTENSITY = {
-    "low": [0, 4],        # sparse
-    "medium": [0, 1, 2],  # standard
-    "high": [1, 3, 5],    # dense, syncopated
+    "low": [0, 4, 9],           # sparse, spacious
+    "medium": [0, 1, 2, 7, 8],  # standard, varied
+    "high": [1, 3, 5, 6, 8],    # dense, syncopated, driving
 }
 
 
@@ -369,6 +375,31 @@ def generate_comping(chords, total_beats: int, intensity: float = 0.5,
         bar_start_beat = bar_idx * 4.0
         bar_start_tick = bar_idx * TICKS_PER_BAR
 
+        # Lay-out (rest) bars: skip this bar entirely for breathing room
+        if intensity < 0.4:
+            layoff_prob = 0.20
+        elif intensity < 0.7:
+            layoff_prob = 0.10
+        else:
+            layoff_prob = 0.05
+        if random.random() < layoff_prob:
+            continue
+
+        # Re-evaluate voicing type every 8 bars for gradual evolution
+        if bar_idx > 0 and bar_idx % 8 == 0:
+            if intensity < 0.3:
+                voicing_type = "shell"
+            elif intensity < 0.7:
+                if coltrane and intensity > 0.5:
+                    voicing_type = random.choice(["rootless_a", "rootless_b", "quartal"])
+                else:
+                    voicing_type = random.choice(["rootless_a", "rootless_b"])
+            else:
+                if coltrane:
+                    voicing_type = random.choice(["drop2", "quartal"])
+                else:
+                    voicing_type = "drop2"
+
         # Choose a rhythm pattern — prefer variety (don't repeat last pattern)
         available = [p for p in pattern_pool if p != prev_pattern_idx]
         if not available:
@@ -394,7 +425,7 @@ def generate_comping(chords, total_beats: int, intensity: float = 0.5,
 
             # Calculate tick position with swing
             tick = _swing_tick(bar_start_tick, beat_offset, swing)
-            tick = _humanize_tick(tick, amount=12 if swing else 5)
+            tick = _humanize_tick(tick, amount=20 if swing else 8)
 
             # Duration in ticks
             dur_ticks = int(duration_beats * TICKS_PER_QUARTER)
@@ -413,12 +444,15 @@ def generate_comping(chords, total_beats: int, intensity: float = 0.5,
                 # Syncopated position
                 base_vel = random.randint(65, 75)
 
-            # Emit one NoteEvent per note in the voicing
-            for midi_pitch in voicing:
+            # Emit one NoteEvent per note in the voicing, with chord spread
+            # Stagger notes bottom-to-top to simulate hand roll
+            spread_amount = random.randint(0, 18) if len(voicing) > 1 else 0
+            for note_idx, midi_pitch in enumerate(sorted(voicing)):
+                note_tick = tick + (note_idx * spread_amount // max(1, len(voicing) - 1))
                 vel = _humanize_velocity(base_vel, amount=4)
                 notes.append(NoteEvent(
                     pitch=midi_pitch,
-                    start_tick=tick,
+                    start_tick=note_tick,
                     duration_ticks=dur_ticks,
                     velocity=vel,
                     channel=0,

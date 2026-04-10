@@ -163,12 +163,15 @@ def _clamp(value: int, low: int = BASS_LOW, high: int = BASS_HIGH) -> int:
 
 def _apply_swing_tick(beat_in_bar: int, bar_start_tick: int, swing: bool) -> int:
     """Convert a beat number (0-3) within a bar to an absolute tick position,
-    applying swing feel to offbeat 8ths.
+    applying swing feel to beats 2 and 4.
 
-    For walking bass, every beat is on a downbeat, so swing mostly affects
-    the feel subtly. The real swing is on 8th-note subdivisions.
+    For walking bass, quarter-note beats get a subtle swing displacement
+    on beats 2 and 4 to match the drummer's triplet feel.
     """
     tick = bar_start_tick + beat_in_bar * TICKS_PER_QUARTER
+    if swing and beat_in_bar in (1, 3):
+        # Shift beats 2 and 4 slightly toward the triplet grid
+        tick += random.randint(8, 22)
     return tick
 
 
@@ -209,13 +212,16 @@ def _next_chord_at_bar(chords, bar_start_beat: float):
 # ---------------------------------------------------------------------------
 
 
-def generate_walking_bass(chords, total_beats: int, swing: bool = True) -> List[NoteEvent]:
+def generate_walking_bass(chords, total_beats: int, swing: bool = True,
+                          intensity: float = 0.5) -> List[NoteEvent]:
     """Generate a walking bass line over the given chord progression.
 
     Args:
         chords: List of ChordEvent objects.
         total_beats: Total number of beats to generate.
         swing: Whether to apply swing feel (affects humanization).
+        intensity: 0.0-1.0. Low (<0.3) mixes in two-feel bars; high (>0.7)
+                   adds 8th-note pickups.
 
     Returns:
         List of NoteEvent objects forming the bass line.
@@ -248,6 +254,42 @@ def generate_walking_bass(chords, total_beats: int, swing: bool = True) -> List[
 
         root_pc = chord.root_pc
         quality = chord.quality
+
+        # --- Low intensity: occasional two-feel simplification ---
+        if intensity < 0.3 and random.random() < 0.30:
+            beat1_midi = _nearest_bass_note(root_pc, current_midi)
+            if abs(beat1_midi - current_midi) > 7:
+                alt = beat1_midi + (-12 if beat1_midi > current_midi else 12)
+                if BASS_LOW <= alt <= BASS_HIGH:
+                    beat1_midi = alt
+            tick1 = _humanize_tick(bar_start_tick, amount=15 if swing else 5)
+            vel1 = _humanize_velocity(random.randint(85, 100))
+            notes.append(NoteEvent(
+                pitch=beat1_midi,
+                start_tick=tick1,
+                duration_ticks=2 * TICKS_PER_QUARTER - random.randint(20, 40),
+                velocity=vel1,
+                channel=0,
+            ))
+            # Beat 3: 5th or root
+            fifth_int = 7
+            for iv in CHORD_TONES.get(chord_beat3.quality, (0, 4, 7)):
+                if 6 <= iv <= 8:
+                    fifth_int = iv
+                    break
+            b3_pc = (chord_beat3.root_pc + fifth_int) % 12 if random.random() < 0.5 else chord_beat3.root_pc
+            beat3_midi = _nearest_bass_note(b3_pc, beat1_midi)
+            tick3 = _humanize_tick(bar_start_tick + 2 * TICKS_PER_QUARTER, amount=15 if swing else 5)
+            vel3 = _humanize_velocity(random.randint(75, 90))
+            notes.append(NoteEvent(
+                pitch=beat3_midi,
+                start_tick=tick3,
+                duration_ticks=2 * TICKS_PER_QUARTER - random.randint(20, 40),
+                velocity=vel3,
+                channel=0,
+            ))
+            current_midi = beat3_midi
+            continue
 
         chord_tone_list = _chord_tones_in_range(root_pc, quality)
         if not chord_tone_list:
@@ -291,12 +333,12 @@ def generate_walking_bass(chords, total_beats: int, swing: bool = True) -> List[
                 if alt <= BASS_HIGH:
                     beat1_midi = alt
 
-        tick1 = _humanize_tick(bar_start_tick, amount=8 if swing else 3)
-        vel1 = _humanize_velocity(random.randint(80, 100))
+        tick1 = _humanize_tick(bar_start_tick, amount=15 if swing else 5)
+        vel1 = _humanize_velocity(random.randint(85, 105))
         notes.append(NoteEvent(
             pitch=beat1_midi,
             start_tick=tick1,
-            duration_ticks=TICKS_PER_QUARTER - 20,  # Slight space between notes
+            duration_ticks=TICKS_PER_QUARTER - random.randint(10, 25),
             velocity=vel1,
             channel=0,
         ))
@@ -325,12 +367,12 @@ def generate_walking_bass(chords, total_beats: int, swing: bool = True) -> List[
             beat2_midi = _clamp(beat1_midi + direction)
 
         beat2_midi = _clamp(beat2_midi)
-        tick2 = _humanize_tick(bar_start_tick + TICKS_PER_QUARTER, amount=8 if swing else 3)
-        vel2 = _humanize_velocity(random.randint(70, 85))
+        tick2 = _humanize_tick(bar_start_tick + TICKS_PER_QUARTER, amount=15 if swing else 5)
+        vel2 = _humanize_velocity(random.randint(65, 80))
         notes.append(NoteEvent(
             pitch=beat2_midi,
             start_tick=tick2,
-            duration_ticks=TICKS_PER_QUARTER - 20,
+            duration_ticks=TICKS_PER_QUARTER - random.randint(15, 40),
             velocity=vel2,
             channel=0,
         ))
@@ -360,12 +402,12 @@ def generate_walking_bass(chords, total_beats: int, swing: bool = True) -> List[
                                             beat3_root_pc, beat3_quality)
 
         beat3_midi = _clamp(beat3_midi)
-        tick3 = _humanize_tick(bar_start_tick + 2 * TICKS_PER_QUARTER, amount=8 if swing else 3)
-        vel3 = _humanize_velocity(random.randint(70, 85))
+        tick3 = _humanize_tick(bar_start_tick + 2 * TICKS_PER_QUARTER, amount=15 if swing else 5)
+        vel3 = _humanize_velocity(random.randint(65, 80))
         notes.append(NoteEvent(
             pitch=beat3_midi,
             start_tick=tick3,
-            duration_ticks=TICKS_PER_QUARTER - 20,
+            duration_ticks=TICKS_PER_QUARTER - random.randint(15, 40),
             velocity=vel3,
             channel=0,
         ))
@@ -385,15 +427,30 @@ def generate_walking_bass(chords, total_beats: int, swing: bool = True) -> List[
             beat4_midi = _clamp(beat4_midi + random.choice([-1, 1]))
 
         beat4_midi = _clamp(beat4_midi)
-        tick4 = _humanize_tick(bar_start_tick + 3 * TICKS_PER_QUARTER, amount=8 if swing else 3)
+        tick4 = _humanize_tick(bar_start_tick + 3 * TICKS_PER_QUARTER, amount=15 if swing else 5)
         vel4 = _humanize_velocity(random.randint(70, 85))
         notes.append(NoteEvent(
             pitch=beat4_midi,
             start_tick=tick4,
-            duration_ticks=TICKS_PER_QUARTER - 20,
+            duration_ticks=TICKS_PER_QUARTER - random.randint(30, 60),
             velocity=vel4,
             channel=0,
         ))
+
+        # High intensity: occasional 8th-note pickup into next bar's beat 1
+        if intensity > 0.7 and random.random() < 0.20 and bar_idx < total_bars - 1:
+            next_bar_chord = _chord_at_beat(chords, (bar_idx + 1) * 4.0)
+            if next_bar_chord is not None:
+                pickup_target = _nearest_bass_note(next_bar_chord.root_pc, beat4_midi)
+                pickup_midi = _chromatic_approach(pickup_target)
+                pickup_tick = bar_start_tick + 3 * TICKS_PER_QUARTER + TICKS_PER_8TH
+                notes.append(NoteEvent(
+                    pitch=_clamp(pickup_midi),
+                    start_tick=_humanize_tick(pickup_tick, amount=12),
+                    duration_ticks=TICKS_PER_8TH - 20,
+                    velocity=_humanize_velocity(random.randint(60, 75)),
+                    channel=0,
+                ))
 
         # Update current position for voice-leading continuity
         current_midi = beat4_midi
