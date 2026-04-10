@@ -4,6 +4,7 @@ Generates idiomatic jazz drum patterns with ride cymbal swing,
 hi-hat pedal, feathered bass drum, snare comping, and fills.
 """
 
+import math
 import random
 from typing import List
 
@@ -52,9 +53,11 @@ def _swing_tick(bar_start_tick: int, beat_offset: float, swing: bool) -> int:
     frac = beat_offset - beat_num
 
     if swing and abs(frac - 0.5) < 0.01:
-        # This is an offbeat 8th — shift to 2/3 position (swing feel)
-        # 2/3 of a quarter note = 320 ticks (at 480 TPQ)
-        tick = bar_start_tick + beat_num * TICKS_PER_QUARTER + int(TICKS_PER_QUARTER * 2 / 3)
+        # This is an offbeat 8th — shift to ~2/3 position (swing feel)
+        # Add per-note jitter so the swing ratio isn't robotic
+        swing_ratio = 0.667 + random.gauss(0, 0.03)
+        swing_ratio = max(0.55, min(0.75, swing_ratio))
+        tick = bar_start_tick + beat_num * TICKS_PER_QUARTER + int(TICKS_PER_QUARTER * swing_ratio)
     else:
         tick = bar_start_tick + int(beat_offset * TICKS_PER_QUARTER)
 
@@ -87,45 +90,59 @@ def _drum_note(pitch: int, tick: int, duration: int, velocity: int) -> NoteEvent
 # ---------------------------------------------------------------------------
 
 
-def _generate_ride(bar_start_tick: int, swing: bool) -> List[NoteEvent]:
+def _generate_ride(bar_start_tick: int, swing: bool,
+                   intensity: float = 0.5, vel_mult: float = 1.0) -> List[NoteEvent]:
     """Generate the ride cymbal swing pattern for one bar.
 
     Core pattern:
-    - Beats 1, 3: always hit (accented)
+    - Beats 1, 3: always hit (accented) — sparse bar may drop one
     - And-of-2, and-of-4: always hit (swing pattern)
     - Beats 2, 4: 70% chance (fill between swing hits)
     """
     notes = []
 
-    # Beats 1 and 3 — always
-    for beat in [0.0, 2.0]:
-        tick = _swing_tick(bar_start_tick, beat, swing)
-        vel = _humanize_velocity(random.randint(90, 100))
-        notes.append(_drum_note(RIDE, _humanize_tick(tick, 5), TICKS_PER_8TH, vel))
+    # Sparse bar chance: inversely scaled by intensity
+    sparse = random.random() < (0.20 - intensity * 0.12)
 
-    # And-of-2 and and-of-4 — the swing pattern, always
+    # Beats 1 and 3 — usually hit, sparse bar may drop one
+    for beat in [0.0, 2.0]:
+        if sparse and random.random() < 0.4:
+            continue  # Drop this hit for a sparser feel
+        tick = _swing_tick(bar_start_tick, beat, swing)
+        vel = _humanize_velocity(round(random.randint(80, 110) * vel_mult))
+        notes.append(_drum_note(RIDE, _humanize_tick(tick, 10), TICKS_PER_8TH, vel))
+
+    # And-of-2 and and-of-4 — the swing pattern
     for beat in [1.5, 3.5]:
         tick = _swing_tick(bar_start_tick, beat, swing)
-        vel = _humanize_velocity(random.randint(75, 85))
-        notes.append(_drum_note(RIDE, _humanize_tick(tick, 8), TICKS_PER_8TH, vel))
+        vel = _humanize_velocity(round(random.randint(60, 85) * vel_mult))
+        notes.append(_drum_note(RIDE, _humanize_tick(tick, 18), TICKS_PER_8TH, vel))
 
     # Beats 2 and 4 — 70% each
     for beat in [1.0, 3.0]:
         if random.random() < 0.70:
             tick = _swing_tick(bar_start_tick, beat, swing)
-            vel = _humanize_velocity(random.randint(80, 90))
-            notes.append(_drum_note(RIDE, _humanize_tick(tick, 5), TICKS_PER_8TH, vel))
+            vel = _humanize_velocity(round(random.randint(70, 90) * vel_mult))
+            notes.append(_drum_note(RIDE, _humanize_tick(tick, 10), TICKS_PER_8TH, vel))
+
+    # Occasional skip note (16th before a downbeat) at higher intensity
+    if intensity > 0.4 and random.random() < 0.10:
+        skip_beat = random.choice([3.75, 1.75])
+        tick = bar_start_tick + int(skip_beat * TICKS_PER_QUARTER)
+        vel = _humanize_velocity(round(random.randint(55, 70) * vel_mult))
+        notes.append(_drum_note(RIDE, _humanize_tick(tick, 8), TICKS_PER_16TH, vel))
 
     return notes
 
 
-def _generate_hihat(bar_start_tick: int, swing: bool) -> List[NoteEvent]:
+def _generate_hihat(bar_start_tick: int, swing: bool,
+                    vel_mult: float = 1.0) -> List[NoteEvent]:
     """Generate hi-hat pedal on beats 2 and 4 (the standard jazz hi-hat pattern)."""
     notes = []
     for beat in [1.0, 3.0]:
         tick = _swing_tick(bar_start_tick, beat, swing)
-        vel = _humanize_velocity(random.randint(50, 60))
-        notes.append(_drum_note(CLOSED_HH, _humanize_tick(tick, 5), TICKS_PER_8TH, vel))
+        vel = _humanize_velocity(round(random.randint(50, 60) * vel_mult))
+        notes.append(_drum_note(CLOSED_HH, _humanize_tick(tick, 8), TICKS_PER_8TH, vel))
     return notes
 
 
@@ -180,7 +197,7 @@ def _generate_snare_comping(bar_start_tick: int, intensity: float,
             pitch = SNARE
 
         vel = _humanize_velocity(random.randint(55, 75))
-        notes.append(_drum_note(pitch, _humanize_tick(tick, 10), TICKS_PER_8TH, vel))
+        notes.append(_drum_note(pitch, _humanize_tick(tick, 15), TICKS_PER_8TH, vel))
 
     return notes
 
@@ -274,8 +291,15 @@ def generate_drums(total_beats: int, intensity: float = 0.5,
     notes: List[NoteEvent] = []
     need_crash = False  # Track if previous bar was a fill
 
+    # Dynamic arc: sine-wave velocity multiplier over 8-16 bar cycles
+    arc_period = random.choice([8, 12, 16])
+
     for bar_idx in range(total_bars):
         bar_start_tick = bar_idx * TICKS_PER_BAR
+
+        # Dynamic arc: ±10% velocity wave
+        arc_phase = (bar_idx % arc_period) / arc_period
+        vel_mult = 1.0 + 0.10 * math.sin(arc_phase * 2 * math.pi)
 
         # Check if this bar should be a fill
         is_fill_bar = (
@@ -298,9 +322,9 @@ def generate_drums(total_beats: int, intensity: float = 0.5,
             notes.extend(fill_func(bar_start_tick, swing))
             need_crash = True
         else:
-            # Normal bar: layer all components
-            notes.extend(_generate_ride(bar_start_tick, swing))
-            notes.extend(_generate_hihat(bar_start_tick, swing))
+            # Normal bar: layer all components with dynamic arc
+            notes.extend(_generate_ride(bar_start_tick, swing, intensity, vel_mult))
+            notes.extend(_generate_hihat(bar_start_tick, swing, vel_mult))
             notes.extend(_generate_kick(bar_start_tick, intensity, swing))
             notes.extend(_generate_snare_comping(bar_start_tick, intensity, swing))
 

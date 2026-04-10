@@ -12,10 +12,10 @@ from coltrain.generation import NoteEvent, TICKS_PER_QUARTER, TICKS_PER_BAR
 # ---------------------------------------------------------------------------
 
 GROOVE_PROFILES = {
-    "drums":  {"timing_ms": 1.0, "velocity_var": 8,  "anticipate_ms": 0},
-    "bass":   {"timing_ms": 3.0, "velocity_var": 10, "anticipate_ms": -2},
-    "piano":  {"timing_ms": 5.0, "velocity_var": 12, "anticipate_ms": 2},
-    "melody": {"timing_ms": 6.0, "velocity_var": 15, "anticipate_ms": 3},
+    "drums":  {"timing_ms": 8.0,  "velocity_var": 12, "anticipate_ms": 0},
+    "bass":   {"timing_ms": 15.0, "velocity_var": 14, "anticipate_ms": -8},
+    "piano":  {"timing_ms": 18.0, "velocity_var": 16, "anticipate_ms": 5},
+    "melody": {"timing_ms": 22.0, "velocity_var": 18, "anticipate_ms": 8},
 }
 
 # ---------------------------------------------------------------------------
@@ -82,7 +82,7 @@ def humanize_track(
     out = [replace(n) for n in sorted(notes, key=lambda n: n.start_tick)]
 
     # Intensity scaling factor for timing offsets
-    scale = 0.5 + intensity * 0.5
+    scale = 0.3 + intensity * 0.7
 
     # --- (a) Timing humanization: Gaussian offset per note ---
     for i, note in enumerate(out):
@@ -118,9 +118,9 @@ def humanize_track(
         clamped = max(1, min(127, note.velocity + jitter))
         out[i] = replace(note, velocity=clamped)
 
-    # --- (d) Duration humanization: shorten to 80-95% of original ---
+    # --- (d) Duration humanization: slight variation around original ---
     for i, note in enumerate(out):
-        factor = random.uniform(0.80, 0.95)
+        factor = random.uniform(0.85, 1.05)
         new_dur = max(30, round(note.duration_ticks * factor))
         out[i] = replace(note, duration_ticks=new_dur)
 
