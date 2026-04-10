@@ -72,8 +72,8 @@ def parse_args(argv=None):
     parser.add_argument(
         "--instrument",
         choices=["sax", "trumpet", "piano"],
-        default="sax",
-        help="Lead instrument (default: sax). sax=65, trumpet=56, piano=0",
+        default="piano",
+        help="Lead instrument (default: piano). sax=65, trumpet=56, piano=0",
     )
     parser.add_argument(
         "--swing",
