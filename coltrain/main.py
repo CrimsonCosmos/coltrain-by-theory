@@ -219,6 +219,7 @@ def main(argv=None):
         bass_style=args.bass_style,
         drum_style=args.drum_style,
         reharmonize_density=reharmonize_density,
+        lead_instrument=args.instrument,
     )
 
     # Count total notes

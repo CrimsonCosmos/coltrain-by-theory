@@ -878,6 +878,7 @@ def generate_arrangement(
     bass_style: str = "walking",
     drum_style: str = "swing",
     reharmonize_density: str = "off",
+    lead_instrument: str = "trumpet",
 ) -> Dict[str, List[NoteEvent]]:
     """Generate the full arrangement by orchestrating all instrument generators.
 
@@ -964,6 +965,12 @@ def generate_arrangement(
                                            coltrane, bass_style, drum_style)
 
         _merge_tracks(tracks, section_notes)
+
+    # Piano trio mode: when lead is piano, drop the comping track entirely.
+    # A real piano trio (Bill Evans, etc.) has one pianist doing both melody
+    # and comping — not two keyboards.
+    if lead_instrument == "piano":
+        tracks["piano"] = []
 
     # Post-processing: humanization — per-section intensity for musical feel
     if humanize:

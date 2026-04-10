@@ -80,23 +80,6 @@ def write_midi(
     if lead_instrument in LEAD_PROGRAMS:
         programs["melody"] = LEAD_PROGRAMS[lead_instrument]
 
-    # When lead is piano, switch comping to Electric Piano (Rhodes) for separation
-    if lead_instrument == "piano":
-        programs["piano"] = 4  # GM Electric Piano 1 (Rhodes)
-
-    # When lead is piano, soften comping to create dynamic separation
-    if lead_instrument == "piano" and "piano" in tracks:
-        tracks["piano"] = [
-            NoteEvent(
-                pitch=n.pitch,
-                start_tick=n.start_tick,
-                duration_ticks=n.duration_ticks,
-                velocity=max(1, int(n.velocity * 0.65)),
-                channel=n.channel,
-            )
-            for n in tracks["piano"]
-        ]
-
     total_notes = 0
 
     for track_name in TRACK_ORDER:
