@@ -17,123 +17,72 @@ import sys
 from coltrain.main import main as coltrain_main
 
 ALBUM_DIR = os.path.expanduser("~/Desktop/coltrain-album")
-NUM_TRACKS = 6
+NUM_TRACKS = 12
 
-# --- Title generation pools ---
-
-ADJECTIVES = [
-    "amber", "blue", "broken", "burning", "cold", "crimson", "dark",
-    "distant", "drifting", "dusty", "electric", "fading", "floating",
-    "foggy", "forgotten", "fractured", "frozen", "gilded", "glass",
-    "golden", "hollow", "hushed", "ivory", "jagged", "late", "liquid",
-    "lonesome", "lost", "luminous", "marble", "muted", "narrow",
-    "neon", "obsidian", "open", "pale", "quiet", "restless", "rusted",
-    "scattered", "shadowed", "sharp", "shifting", "silent", "silver",
-    "sleepless", "slow", "smoked", "solitary", "southern", "spare",
-    "steep", "still", "sunken", "tangled", "tarnished", "thin",
-    "twilight", "unspoken", "vacant", "velvet", "warm", "winding",
-    "worn",
-]
-
-NOUNS = [
-    "alley", "arc", "avenue", "axis", "basin", "bloom", "boulevard",
-    "bridge", "cadence", "canyon", "cathedral", "circuit", "clearing",
-    "clockwork", "coastline", "contour", "corridor", "crossroads",
-    "current", "dawn", "descent", "doorway", "dusk", "echo", "edge",
-    "embers", "equation", "estuary", "evening", "fever", "field",
-    "flight", "fog", "fracture", "garden", "gate", "geometry", "glass",
-    "gravity", "harbor", "haze", "horizon", "inlet", "junction",
-    "lantern", "lattice", "ledge", "light", "meridian", "midnight",
-    "mirror", "monument", "mosaic", "motion", "nightfall", "orbit",
-    "overpass", "passage", "pavilion", "pendulum", "pier", "plaza",
-    "pool", "prism", "pulse", "rain", "reflection", "ridge", "river",
-    "rooftop", "rotation", "ruins", "scaffold", "shadow", "signal",
-    "skyline", "smoke", "solstice", "spiral", "station", "stone",
-    "summit", "surface", "territory", "thread", "threshold", "tide",
-    "tower", "transit", "tributary", "undertow", "viaduct", "voltage",
-    "waterline", "window",
-]
-
-# Patterns: functions that combine words into a title
-def _title_adj_noun():
-    return f"{random.choice(ADJECTIVES).title()} {random.choice(NOUNS).title()}"
-
-def _title_the_noun():
-    return f"The {random.choice(NOUNS).title()}"
-
-def _title_noun_of_noun():
-    return f"{random.choice(NOUNS).title()} Of {random.choice(NOUNS).title()}"
-
-def _title_single_noun():
-    return random.choice(NOUNS).title()
-
-def _title_adj_adj_noun():
-    a1 = random.choice(ADJECTIVES)
-    a2 = random.choice([a for a in ADJECTIVES if a != a1])
-    return f"{a1.title()} {a2.title()} {random.choice(NOUNS).title()}"
-
-_TITLE_GENERATORS = [
-    _title_adj_noun, _title_adj_noun, _title_adj_noun,  # weighted toward this
-    _title_the_noun,
-    _title_noun_of_noun,
-    _title_single_noun,
-    _title_adj_adj_noun,
-]
-
-
-def generate_title(existing_titles):
-    """Generate a unique random song title."""
-    for _ in range(50):
-        title = random.choice(_TITLE_GENERATORS)()
-        if title not in existing_titles:
-            return title
-    return f"Track {len(existing_titles) + 1}"
-
-
-def sanitize_filename(title):
-    """Convert a title to a safe filename slug."""
-    return title.lower().replace(" ", "_").replace("'", "")
+def _next_track_number(album_dir):
+    """Find the highest existing track number in album_dir and return the next one."""
+    highest = 0
+    for f in glob.glob(os.path.join(album_dir, "*.mid")):
+        name = os.path.splitext(os.path.basename(f))[0]  # "007" or "02_slug"
+        try:
+            num = int(name.split("_")[0])
+            highest = max(highest, num)
+        except (ValueError, IndexError):
+            pass
+    return highest + 1
 
 
 # --- Musical parameter pools ---
 
-FORMS = ["blues12", "blues_bird", "rhythm_changes", "aaba32", "giantsteps"]
+FORMS = ["coltrain"]
 KEYS = ["C", "Db", "D", "Eb", "E", "F", "Gb", "G", "Ab", "A", "Bb", "B"]
-INSTRUMENTS = ["trumpet", "piano"]
 TENSIONS = ["arc", "build", "wave", "plateau", "catharsis"]
+DRUM_STYLES = ["swing", "modal", "brushes"]
 REHARMONIZE_LEVELS = ["off", "light", "medium", "heavy"]
 
 
-def generate_tracklist(num_tracks, album_seed=None):
-    """Generate a randomized tracklist ensuring variety."""
+def generate_tracklist(num_tracks, album_dir, album_seed=None, style=None):
+    """Generate a randomized tracklist ensuring variety.
+
+    Args:
+        style: Optional style preset. "giantsteps" locks all tracks to
+               giantsteps form with coltrane mode and swing drums.
+    """
     if album_seed is not None:
         random.seed(album_seed)
 
     tracks = []
-    used_titles = set()
-    used_forms = []
+    start_num = _next_track_number(album_dir)
 
     # Ensure we use a variety of forms — shuffle and cycle if needed
     form_bag = list(FORMS)
     random.shuffle(form_bag)
 
     for i in range(num_tracks):
-        # Pick form: cycle through shuffled bag to avoid repeats
-        if not form_bag:
-            form_bag = list(FORMS)
-            random.shuffle(form_bag)
-        form = form_bag.pop()
+        if style == "giantsteps":
+            form = "giantsteps"
+        elif style == "coltrain":
+            form = "coltrain"
+        else:
+            # Pick form: cycle through shuffled bag to avoid repeats
+            if not form_bag:
+                form_bag = list(FORMS)
+                random.shuffle(form_bag)
+            form = form_bag.pop()
 
-        # Title
-        title = generate_title(used_titles)
-        used_titles.add(title)
+        # Track number (always incrementing)
+        track_num = start_num + i
 
         # Key: random
         key = random.choice(KEYS)
 
         # Tempo: form-appropriate ranges
-        if form == "giantsteps":
+        if style == "giantsteps":
             tempo = random.randint(130, 170)
+        elif form == "giantsteps":
+            tempo = random.randint(130, 170)
+        elif form == "coltrain":
+            tempo = random.randint(100, 165)
         elif form in ("blues12", "blues_bird"):
             tempo = random.randint(88, 145)
         elif form == "rhythm_changes":
@@ -144,61 +93,99 @@ def generate_tracklist(num_tracks, album_seed=None):
         # Choruses: 3-5
         choruses = random.randint(3, 5)
 
-        # Instrument: random but avoid 3+ in a row
-        if len(tracks) >= 2 and tracks[-1]["instrument"] == tracks[-2]["instrument"]:
-            inst = random.choice([x for x in INSTRUMENTS if x != tracks[-1]["instrument"]])
-        else:
-            inst = random.choice(INSTRUMENTS)
-
         # Tension curve: random
         tension = random.choice(TENSIONS)
 
-        # Reharmonize: more likely on complex forms
-        if form in ("giantsteps", "rhythm_changes"):
+        # Reharmonize
+        if style == "giantsteps":
+            reharm = random.choice(["medium", "medium", "heavy"])
+        elif form == "coltrain":
+            reharm = random.choice(["light", "medium", "medium", "heavy"])
+        elif form in ("giantsteps", "rhythm_changes"):
             reharm = random.choice(["off", "light", "medium", "medium", "heavy"])
         elif form == "blues_bird":
             reharm = random.choice(["off", "light", "light", "medium"])
         else:
             reharm = random.choice(["off", "off", "light", "medium"])
 
-        # Coltrane mode: only with giantsteps or complex reharm
-        coltrane = form == "giantsteps" or (reharm == "heavy" and random.random() < 0.5)
+        # Coltrane mode
+        if style == "giantsteps":
+            coltrane = True
+        elif form == "coltrain":
+            coltrane = random.random() < 0.6  # 60% chance — bridge has its own modulations
+        else:
+            coltrane = form == "giantsteps" or (reharm == "heavy" and random.random() < 0.5)
+
+        # Drum style — piano trio defaults to brushes (stirring, intimate texture)
+        if tempo >= 170:
+            # Very fast tempos: swing sticks sound better
+            drum_style = "swing"
+        elif tempo >= 150:
+            # Fast tempos: mostly swing, occasional brushes
+            drum_style = "brushes" if random.random() < 0.30 else "swing"
+        elif form == "giantsteps":
+            # Giant Steps: swing at fast tempos, brushes at moderate
+            drum_style = "brushes" if tempo < 140 else "swing"
+        else:
+            # Under 150 BPM: heavily favor brushes (80%), occasional modal/swing
+            r = random.random()
+            if r < 0.80:
+                drum_style = "brushes"
+            elif r < 0.90:
+                drum_style = "modal"
+            else:
+                drum_style = "swing"
 
         # Unique seed per track (derived from album seed or random)
         track_seed = random.randint(1, 99999)
 
         tracks.append({
-            "title": title,
+            "number": track_num,
             "form": form,
             "key": key,
             "tempo": tempo,
             "choruses": choruses,
-            "instrument": inst,
             "tension": tension,
             "reharmonize": reharm,
             "coltrane": coltrane,
+            "drum_style": drum_style,
+            "drum_solo": False,
+            "bass_solo": False,
             "seed": track_seed,
         })
+
+    # Assign drum and bass solos to specific tracks for variety
+    drum_solo_indices = {2, 9, 10}    # 0-indexed
+    bass_solo_indices = {4, 5}         # 0-indexed
+    for idx, t in enumerate(tracks):
+        if idx in drum_solo_indices:
+            t["drum_solo"] = True
+        if idx in bass_solo_indices:
+            t["bass_solo"] = True
 
     return tracks
 
 
 def main():
-    # Parse optional --seed argument
+    # Parse optional --seed and --style arguments
     album_seed = None
+    style = None
     if "--seed" in sys.argv:
         idx = sys.argv.index("--seed")
         if idx + 1 < len(sys.argv):
             album_seed = int(sys.argv[idx + 1])
+    if "--style" in sys.argv:
+        idx = sys.argv.index("--style")
+        if idx + 1 < len(sys.argv):
+            style = sys.argv[idx + 1]
 
     os.makedirs(ALBUM_DIR, exist_ok=True)
 
-    # Clean old files
-    for ext in ("*.mid", "*.mp3"):
-        for f in glob.glob(os.path.join(ALBUM_DIR, ext)):
-            os.remove(f)
+    # Wipe existing tracks before generating
+    for old_mid in glob.glob(os.path.join(ALBUM_DIR, "*.mid")):
+        os.remove(old_mid)
 
-    tracklist = generate_tracklist(NUM_TRACKS, album_seed)
+    tracklist = generate_tracklist(NUM_TRACKS, ALBUM_DIR, album_seed, style=style)
 
     print("=" * 60)
     print("  COLTRAIN BY THEORY -- Album Generation")
@@ -207,8 +194,8 @@ def main():
     print("=" * 60)
 
     for i, track in enumerate(tracklist, 1):
-        slug = sanitize_filename(track["title"])
-        filename = f"{i:02d}_{slug}.mid"
+        num = track["number"]
+        filename = f"{num:03d}.mid"
         output = os.path.join(ALBUM_DIR, filename)
 
         args = [
@@ -217,19 +204,32 @@ def main():
             "--tempo", str(track["tempo"]),
             "--choruses", str(track["choruses"]),
             "--tension", track["tension"],
-            "--instrument", track["instrument"],
             "--seed", str(track["seed"]),
         ]
         if track["reharmonize"] != "off":
             args += ["--reharmonize", track["reharmonize"]]
         if track["coltrane"]:
             args += ["--coltrane"]
+        if track.get("drum_style", "swing") != "swing":
+            args += ["--drum-style", track["drum_style"]]
+        if track.get("drum_solo"):
+            args += ["--drum-solo"]
+        if track.get("bass_solo"):
+            args += ["--bass-solo"]
         args += ["-o", output]
 
         print(f"\n{'~'*60}")
-        print(f"  Track {i}/{NUM_TRACKS}: {track['title']}")
+        print(f"  Track {i}/{NUM_TRACKS}: #{num}")
+        extras = []
+        if track.get("coltrane"):
+            extras.append("coltrane")
+        if track.get("drum_solo"):
+            extras.append("drum solo")
+        if track.get("bass_solo"):
+            extras.append("bass solo")
+        extras_str = ", " + ", ".join(extras) if extras else ""
         print(f"  {track['form']} in {track['key']} @ {track['tempo']} BPM"
-              f"  ({track['instrument']}, {track['tension']})")
+              f"  (piano, {track['tension']}, {track['drum_style']}{extras_str})")
         print(f"{'~'*60}")
 
         coltrain_main(args)
@@ -239,12 +239,12 @@ def main():
     print(f"  {ALBUM_DIR}")
     print(f"{'=' * 60}\n")
 
-    for i, track in enumerate(tracklist, 1):
-        slug = sanitize_filename(track["title"])
-        filename = f"{i:02d}_{slug}.mid"
+    for track in tracklist:
+        num = track["number"]
+        filename = f"{num:03d}.mid"
         path = os.path.join(ALBUM_DIR, filename)
         size = os.path.getsize(path) if os.path.exists(path) else 0
-        print(f"  {filename:45s} {size // 1024:4d} KB")
+        print(f"  {filename:20s} {size // 1024:4d} KB")
     print()
 
 

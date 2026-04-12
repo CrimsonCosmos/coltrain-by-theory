@@ -70,12 +70,6 @@ def parse_args(argv=None):
         help="Enable Coltrane features (multi-tonic, sheets of sound)",
     )
     parser.add_argument(
-        "--instrument",
-        choices=["sax", "trumpet", "piano"],
-        default="piano",
-        help="Lead instrument (default: piano). sax=65, trumpet=56, piano=0",
-    )
-    parser.add_argument(
         "--swing",
         type=float,
         default=0.667,
@@ -121,9 +115,25 @@ def parse_args(argv=None):
     )
     parser.add_argument(
         "--drum-style",
-        choices=["swing", "modal"],
+        choices=["swing", "modal", "brushes"],
         default="swing",
         help="Drum pattern style (default: swing)",
+    )
+    parser.add_argument(
+        "--drum-solo",
+        action="store_true",
+        help="Include a 1-chorus drum solo section",
+    )
+    parser.add_argument(
+        "--bass-solo",
+        action="store_true",
+        help="Include a 1-chorus bass solo section",
+    )
+    parser.add_argument(
+        "--render",
+        choices=["midi", "wav", "mp3"],
+        default="midi",
+        help="Output format: midi (default), wav, or mp3 (requires numpy/scipy/soundfile)",
     )
 
     return parser.parse_args(argv)
@@ -158,7 +168,9 @@ def main(argv=None):
     num_choruses = max(1, args.choruses)
 
     # Build arrangement structure
-    arrangement = build_arrangement(form_name, num_choruses, bars_per_chorus)
+    arrangement = build_arrangement(form_name, num_choruses, bars_per_chorus,
+                                    drum_solo=args.drum_solo,
+                                    bass_solo=args.bass_solo)
 
     # Calculate total beats from the arrangement
     total_beats = max(s.end_beat for s in arrangement)
@@ -187,7 +199,6 @@ def main(argv=None):
     print(f"  Tempo:      {tempo} BPM")
     print(f"  Choruses:   {num_choruses} solo")
     print(f"  Tension:    {args.tension}")
-    print(f"  Instrument: {args.instrument}")
     print(f"  Swing:      {args.swing:.3f}")
     print(f"  Bass:       {args.bass_style}")
     print(f"  Drums:      {args.drum_style}")
@@ -205,7 +216,7 @@ def main(argv=None):
 
     # Generate arrangement
     print("Generating...", flush=True)
-    tracks = generate_arrangement(
+    tracks, cc_events, pitch_bend_events = generate_arrangement(
         arrangement=arrangement,
         chords=all_chords,
         form_bars=bars_per_chorus,
@@ -219,7 +230,6 @@ def main(argv=None):
         bass_style=args.bass_style,
         drum_style=args.drum_style,
         reharmonize_density=reharmonize_density,
-        lead_instrument=args.instrument,
     )
 
     # Count total notes
@@ -228,7 +238,8 @@ def main(argv=None):
 
     # Write MIDI
     notes_written = write_midi(
-        tracks, args.output, tempo=tempo, lead_instrument=args.instrument,
+        tracks, args.output, tempo=tempo, lead_instrument="piano",
+        cc_events=cc_events, pitch_bend_events=pitch_bend_events,
     )
 
     print(f"Saved: {args.output} ({total_bars} bars, {total_notes} notes)")
@@ -240,6 +251,16 @@ def main(argv=None):
         chart_path = os.path.splitext(args.output)[0] + "_chart.txt"
         write_chord_chart(all_chords, chart_path)
         print(f"Chart: {chart_path}")
+
+    # Render audio if requested
+    if args.render in ("wav", "mp3"):
+        from coltrain.audio.engine import AudioEngine
+        engine = AudioEngine(tempo=tempo)
+        audio_path = engine.render(
+            tracks, cc_events, pitch_bend_events,
+            output_path=args.output, format=args.render,
+        )
+        print(f"Audio: {audio_path}")
 
     print()
 
@@ -302,6 +323,7 @@ def _build_full_chord_progression(
                             duration_beats=clipped_dur,
                             key_center_pc=c.key_center_pc,
                             function=c.function,
+                            form_section=c.form_section,
                         ))
 
         elif section.name == "coda":
@@ -327,6 +349,7 @@ def _build_full_chord_progression(
                             duration_beats=clipped_dur,
                             key_center_pc=c.key_center_pc,
                             function=c.function,
+                            form_section=c.form_section,
                         ))
 
         else:

@@ -68,6 +68,7 @@ class ChordEvent:
     duration_beats: float           # How long this chord lasts
     key_center_pc: int = 0          # For Coltrane multi-tonic analysis
     function: str = ""              # Roman numeral function: 'I', 'ii', 'V', etc.
+    form_section: str = ""           # Form section label: 'A', 'B', 'C'
 
     @property
     def end_beat(self) -> float:
