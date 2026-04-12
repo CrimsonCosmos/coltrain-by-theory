@@ -10,7 +10,7 @@ from typing import Dict, List
 
 import mido
 
-from ..generation import NoteEvent, TICKS_PER_QUARTER
+from ..generation import NoteEvent, CCEvent, PitchBendEvent, TICKS_PER_QUARTER
 
 # ---------------------------------------------------------------------------
 # Instrument configuration
@@ -18,8 +18,8 @@ from ..generation import NoteEvent, TICKS_PER_QUARTER
 
 # MIDI program numbers (General MIDI)
 PROGRAMS = {
-    "melody": 65,    # Alto Sax
-    "piano": 0,      # Acoustic Grand Piano
+    "melody": 0,     # Acoustic Grand Piano (right hand)
+    "piano": 0,      # Acoustic Grand Piano (left hand)
     "bass": 32,      # Acoustic Bass
     "drums": None,   # Drums use channel 9, no program change needed
 }
@@ -39,6 +39,14 @@ CHANNELS = {
     "drums": 9,
 }
 
+# Default stereo pan positions (CC10: 0=hard left, 64=center, 127=hard right)
+DEFAULT_PAN = {
+    "melody": 45,    # Right hand piano — left of center
+    "piano": 82,     # Left hand comping — right of center
+    "bass": 58,      # Slightly left of center
+    "drums": 70,     # Slightly right of center
+}
+
 # Track ordering
 TRACK_ORDER = ("melody", "piano", "bass", "drums")
 
@@ -53,6 +61,8 @@ def write_midi(
     output_path: str,
     tempo: int = 140,
     lead_instrument: str = "sax",
+    cc_events: Dict[str, List] = None,
+    pitch_bend_events: Dict[str, List] = None,
 ) -> int:
     """Write a multi-track MIDI file from generated NoteEvent data.
 
@@ -97,8 +107,11 @@ def write_midi(
 
         channel = CHANNELS.get(track_name, 0)
 
-        # Program change (not for drums)
-        if track_name != "drums":
+        # Program change
+        if track_name == "drums":
+            track.append(mido.Message("program_change", program=32,
+                                       channel=channel, time=0))
+        else:
             program = programs.get(track_name, 0)
             track.append(mido.Message("program_change", program=program,
                                        channel=channel, time=0))
@@ -109,28 +122,67 @@ def write_midi(
             # Clamp values
             pitch = max(0, min(127, ne.pitch))
             velocity = max(1, min(127, ne.velocity))
+            # Pull drums back in the mix (classic jazz balance)
+            if track_name == "drums":
+                velocity = max(1, min(127, int(velocity * 0.55)))
             start = max(0, ne.start_tick)
             end = max(start + 1, start + ne.duration_ticks)
 
             midi_events.append((start, "note_on", pitch, velocity, channel))
             midi_events.append((end, "note_off", pitch, 0, channel))
 
+        # Merge CC events for this track
+        if cc_events and track_name in cc_events:
+            for cc in cc_events[track_name]:
+                cc_num = max(0, min(127, cc.cc_number))
+                cc_val = max(0, min(127, cc.value))
+                cc_ch = cc.channel
+                midi_events.append((max(0, cc.start_tick), "control_change", cc_num, cc_val, cc_ch))
+
+        # Merge pitch bend events for this track
+        if pitch_bend_events and track_name in pitch_bend_events:
+            for pb in pitch_bend_events[track_name]:
+                pb_val = max(-8192, min(8191, pb.value))
+                pb_ch = pb.channel
+                midi_events.append((max(0, pb.start_tick), "pitchwheel", pb_val, 0, pb_ch))
+
         # Sort by absolute time; note_off before note_on at the same time
-        # to avoid hanging notes
-        midi_events.sort(key=lambda e: (e[0], 0 if e[1] == "note_off" else 1))
+        # to avoid hanging notes. Priority: note_off(0) < CC(1) < pitchwheel(1.5) < note_on(2).
+        def _sort_key(e):
+            if e[1] == "note_off":
+                return (e[0], 0)
+            elif e[1] == "control_change":
+                return (e[0], 1)
+            elif e[1] == "pitchwheel":
+                return (e[0], 1.5)
+            else:
+                return (e[0], 2)
+        midi_events.sort(key=_sort_key)
 
         # Convert to delta times
         current_time = 0
-        for abs_time, msg_type, pitch, velocity, ch in midi_events:
+        for event in midi_events:
+            abs_time = event[0]
+            msg_type = event[1]
             delta = abs_time - current_time
             if delta < 0:
                 delta = 0
 
             if msg_type == "note_on":
+                _, _, pitch, velocity, ch = event
                 track.append(mido.Message("note_on", note=pitch, velocity=velocity,
                                            channel=ch, time=delta))
-            else:
+            elif msg_type == "note_off":
+                _, _, pitch, velocity, ch = event
                 track.append(mido.Message("note_off", note=pitch, velocity=0,
+                                           channel=ch, time=delta))
+            elif msg_type == "control_change":
+                _, _, cc_num, cc_val, ch = event
+                track.append(mido.Message("control_change", control=cc_num,
+                                           value=cc_val, channel=ch, time=delta))
+            elif msg_type == "pitchwheel":
+                _, _, pb_val, _, ch = event
+                track.append(mido.Message("pitchwheel", pitch=pb_val,
                                            channel=ch, time=delta))
             current_time = abs_time
 

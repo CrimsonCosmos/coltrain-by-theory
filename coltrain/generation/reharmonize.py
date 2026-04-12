@@ -99,6 +99,7 @@ def _tritone_sub(
         duration_beats=half,
         key_center_pc=_key_center_for_sub(sub_root, "7"),
         function="bII",
+        form_section=v_chord.form_section,
     )
 
     # I chord starts half a V-duration earlier, gaining that time
@@ -109,6 +110,7 @@ def _tritone_sub(
         duration_beats=half + i_chord.duration_beats,
         key_center_pc=i_chord.root_pc,
         function=i_chord.function or "I",
+        form_section=i_chord.form_section,
     )
 
     return [sub, i_adjusted]
@@ -142,6 +144,7 @@ def _short_coltrane_cycle(
             duration_beats=sub_dur,
             key_center_pc=_key_center_for_sub(root, "7"),
             function=fn,
+            form_section=v_chord.form_section,
         ))
 
     # I chord keeps its original start and duration
@@ -152,6 +155,7 @@ def _short_coltrane_cycle(
         duration_beats=i_chord.duration_beats,
         key_center_pc=i_chord.root_pc,
         function=i_chord.function or "I",
+        form_section=i_chord.form_section,
     ))
 
     return result
@@ -198,6 +202,7 @@ def _full_coltrane_cycle(
             duration_beats=slice_dur,
             key_center_pc=_key_center_for_sub(root, quality),
             function=fn,
+            form_section=v_chord.form_section,
         ))
         current_beat += slice_dur
 
@@ -210,6 +215,7 @@ def _full_coltrane_cycle(
         duration_beats=remainder,
         key_center_pc=i_chord.root_pc,
         function=i_chord.function or "I",
+        form_section=i_chord.form_section,
     ))
 
     return result

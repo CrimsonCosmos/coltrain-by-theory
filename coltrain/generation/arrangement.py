@@ -9,14 +9,14 @@ import random
 from dataclasses import dataclass
 from typing import Dict, List, Optional
 
-from coltrain.generation import NoteEvent, TICKS_PER_QUARTER, TICKS_PER_BAR
-from coltrain.theory.chord import ChordEvent
+from coltrain.generation import NoteEvent, CCEvent, PitchBendEvent, BarContext, BarFeel, TICKS_PER_QUARTER, TICKS_PER_BAR
+from coltrain.theory.chord import ChordEvent, CHORD_TONES
 from coltrain.theory.pitch import NOTE_TO_PC
 
-from coltrain.generation.melody import generate_head_melody, generate_solo, generate_trading_fours
-from coltrain.generation.bass import generate_walking_bass, generate_two_feel_bass, generate_modal_bass
-from coltrain.generation.drums import generate_drums, generate_modal_drums
-from coltrain.generation.piano import generate_comping
+from coltrain.generation.melody import generate_head_melody, generate_solo, generate_trading_fours, generate_melody_expression
+from coltrain.generation.bass import generate_walking_bass, generate_two_feel_bass, generate_modal_bass, generate_bass_solo, generate_bass_expression
+from coltrain.generation.drums import generate_drums, generate_modal_drums, generate_brushes_drums, generate_drum_solo, generate_hihat_expression
+from coltrain.generation.piano import generate_comping, generate_sustain_pedal, harmonize_head_melody
 from coltrain.generation.humanize import humanize_track
 from coltrain.generation.reharmonize import reharmonize
 
@@ -28,13 +28,16 @@ from coltrain.generation.reharmonize import reharmonize
 @dataclass
 class ArrangementSection:
     """A section of the jazz arrangement."""
-    name: str           # 'intro', 'head_in', 'solo', 'trading', 'head_out', 'coda'
+    name: str           # 'intro', 'head_in', 'solo', 'trading', 'head_out', 'coda',
+                        # 'drum_solo', 'bass_solo'
     start_beat: int
     end_beat: int
     intensity: float    # 0.0-1.0
     is_melody: bool = False
     is_solo: bool = False
     is_trading: bool = False
+    is_drum_solo: bool = False
+    is_bass_solo: bool = False
 
     @property
     def total_beats(self) -> int:
@@ -52,6 +55,10 @@ class ArrangementSection:
             flags.append("solo")
         if self.is_trading:
             flags.append("trading")
+        if self.is_drum_solo:
+            flags.append("drum solo")
+        if self.is_bass_solo:
+            flags.append("bass solo")
         flag_str = f" [{', '.join(flags)}]" if flags else ""
         return (
             f"  {self.name:12s}  bars {self.start_beat // 4 + 1:3d}-{self.end_beat // 4:3d}"
@@ -68,6 +75,7 @@ class ArrangementSection:
 FORM_TEMPLATES = {
     "blues12": {
         "bars": 12,
+        "sections": [("A", 0, 16), ("B", 16, 32), ("C", 32, 48)],
         "changes": [
             # Bar 1-4: I7
             (0, "7", 4), (0, "7", 4), (0, "7", 4), (0, "7", 4),
@@ -85,6 +93,7 @@ FORM_TEMPLATES = {
     },
     "blues_bird": {
         "bars": 12,
+        "sections": [("A", 0, 16), ("B", 16, 32), ("C", 32, 48)],
         "changes": [
             # Bird blues (Charlie Parker style)
             # Bar 1: Imaj7
@@ -115,6 +124,7 @@ FORM_TEMPLATES = {
     },
     "rhythm_changes": {
         "bars": 32,
+        "sections": [("A", 0, 32), ("A", 32, 64), ("B", 64, 96), ("A", 96, 128)],
         "changes": [
             # A section (bars 1-8)
             (0, "maj7", 2), (9, "min7", 1), (2, "min7", 1),  # Bb | G-7 C-7
@@ -140,6 +150,7 @@ FORM_TEMPLATES = {
     },
     "aaba32": {
         "bars": 32,
+        "sections": [("A", 0, 32), ("A", 32, 64), ("B", 64, 96), ("A", 96, 128)],
         "changes": [
             # A section (bars 1-8) -- ii-V-I in major
             (2, "min7", 4), (7, "7", 4),                       # ii-7 | V7
@@ -165,6 +176,7 @@ FORM_TEMPLATES = {
     },
     "giantsteps": {
         "bars": 16,
+        "sections": [("A", 0, 32), ("B", 32, 64)],
         "changes": [
             # Giant Steps (John Coltrane) -- 16 bars
             # Key centers rotate at major thirds: B, G, Eb
@@ -202,6 +214,67 @@ FORM_TEMPLATES = {
             (6, "7", 2), (0, "maj7", 2),
         ],
     },
+    "coltrain": {
+        "bars": 32,
+        "sections": [("A", 0, 32), ("A", 32, 64), ("B", 64, 96), ("A", 96, 128)],
+        "changes": [
+            # === A section (bars 1-8): bebop-blues grounding ===
+            # Bar 1: Imaj7 — home, breathe
+            (0, "maj7", 4),
+            # Bar 2: vi-7 | II7 — secondary dominant chain
+            (9, "min7", 2), (2, "7", 2),
+            # Bar 3: ii-7 | V7 — classic ii-V
+            (2, "min7", 2), (7, "7", 2),
+            # Bar 4: Imaj7 | #iv°7 — resolve + chromatic passing
+            (0, "maj7", 2), (6, "dim7", 2),
+            # Bar 5: iv-7 | bVII7 — blues minor iv + tritone sub
+            (5, "min7", 2), (10, "7", 2),
+            # Bar 6: iii-7 | VI7 — secondary dominant
+            (4, "min7", 2), (9, "7", 2),
+            # Bar 7: ii-7 | V7 — resolving ii-V
+            (2, "min7", 2), (7, "7", 2),
+            # Bar 8: Imaj7 | V7 — tonic + turnaround
+            (0, "maj7", 2), (7, "7", 2),
+
+            # === A section repeat (bars 9-16) ===
+            (0, "maj7", 4),
+            (9, "min7", 2), (2, "7", 2),
+            (2, "min7", 2), (7, "7", 2),
+            (0, "maj7", 2), (6, "dim7", 2),
+            (5, "min7", 2), (10, "7", 2),
+            (4, "min7", 2), (9, "7", 2),
+            (2, "min7", 2), (7, "7", 2),
+            (0, "maj7", 2), (7, "7", 2),
+
+            # === B section / bridge (bars 17-24): Coltrane adventure ===
+            # Bar 17: ii-V to bVI — major-third modulation
+            (10, "min7", 2), (3, "7", 2),
+            # Bar 18: bVImaj7 — first distant key center
+            (8, "maj7", 4),
+            # Bar 19: ii-V to III — second major-third modulation
+            (6, "min7", 2), (11, "7", 2),
+            # Bar 20: IIImaj7 — second distant key center
+            (4, "maj7", 4),
+            # Bar 21: VI7 | II7 — cycle of dominants back
+            (9, "7", 2), (2, "7", 2),
+            # Bar 22: V7 — dominant pedal, tension builds
+            (7, "7", 4),
+            # Bar 23: iii-7 | VI7 — secondary dominant chain
+            (4, "min7", 2), (9, "7", 2),
+            # Bar 24: ii-7 | V7 — final ii-V home
+            (2, "min7", 2), (7, "7", 2),
+
+            # === A section final (bars 25-32) ===
+            (0, "maj7", 4),
+            (9, "min7", 2), (2, "7", 2),
+            (2, "min7", 2), (7, "7", 2),
+            (0, "maj7", 2), (6, "dim7", 2),
+            (5, "min7", 2), (10, "7", 2),
+            (4, "min7", 2), (9, "7", 2),
+            (2, "min7", 2), (7, "7", 2),
+            (0, "maj7", 2), (7, "7", 2),
+        ],
+    },
 }
 
 # Key center assignments for Giant Steps (Coltrane multi-tonic system)
@@ -223,6 +296,14 @@ GIANT_STEPS_KEY_CENTERS = {
 # ---------------------------------------------------------------------------
 # Chord progression builder
 # ---------------------------------------------------------------------------
+
+
+def _get_form_section(beat_in_chorus: float, sections: list) -> str:
+    """Return the form section label for a beat position within one chorus."""
+    for label, start_beat, end_beat in sections:
+        if start_beat <= beat_in_chorus < end_beat:
+            return label
+    return ""
 
 
 def build_chord_progression(
@@ -253,11 +334,13 @@ def build_chord_progression(
 
     template = FORM_TEMPLATES[form_name]
     changes = template["changes"]
+    sections = template.get("sections", [])
 
     chords: List[ChordEvent] = []
     beat = start_beat
 
     for chorus_idx in range(num_choruses):
+        chorus_start = beat
         for root_interval, quality, duration in changes:
             root_pc = (key_pc + root_interval) % 12
 
@@ -278,6 +361,7 @@ def build_chord_progression(
                 start_beat=beat,
                 duration_beats=float(duration),
                 key_center_pc=key_center_pc,
+                form_section=_get_form_section(beat - chorus_start, sections),
             ))
             beat += duration
 
@@ -322,18 +406,23 @@ def build_arrangement(
     form_name: str,
     num_choruses: int,
     bars_per_chorus: int,
+    drum_solo: bool = False,
+    bass_solo: bool = False,
 ) -> List[ArrangementSection]:
     """Build the arrangement structure (section layout) for a jazz tune.
 
     Structure varies by number of choruses:
     - 1 chorus:  intro(4) + head(1 chorus) + coda(4)
     - 2 choruses: intro(4) + head_in(1) + solo(1) + coda(4)
-    - 3+: intro(4) + head_in(1) + solos + trading(1) + head_out(1) + coda(4)
+    - 3+: intro(4) + head_in(1) + solos + [bass_solo] + trading + [drum_solo]
+           + head_out(1) + coda(4)
 
     Args:
         form_name: Form template name.
         num_choruses: Number of solo choruses (total arrangement is longer).
         bars_per_chorus: Number of bars in one chorus of the form.
+        drum_solo: Insert a 1-chorus drum solo before head_out.
+        bass_solo: Insert a 1-chorus bass solo after piano solos.
 
     Returns:
         List of ArrangementSection objects.
@@ -417,6 +506,18 @@ def build_arrangement(
             ))
             current_beat = solo_end
 
+        # Bass solo: 1 chorus (after piano solos, before trading)
+        if bass_solo:
+            bs_end = current_beat + beats_per_chorus
+            sections.append(ArrangementSection(
+                name="bass_solo",
+                start_beat=current_beat,
+                end_beat=bs_end,
+                intensity=0.6,
+                is_bass_solo=True,
+            ))
+            current_beat = bs_end
+
         # Trading fours: 1 chorus
         trading_end = current_beat + beats_per_chorus
         sections.append(ArrangementSection(
@@ -427,6 +528,18 @@ def build_arrangement(
             is_trading=True,
         ))
         current_beat = trading_end
+
+        # Drum solo: 1 chorus (after trading, before head out)
+        if drum_solo:
+            ds_end = current_beat + beats_per_chorus
+            sections.append(ArrangementSection(
+                name="drum_solo",
+                start_beat=current_beat,
+                end_beat=ds_end,
+                intensity=0.7,
+                is_drum_solo=True,
+            ))
+            current_beat = ds_end
 
         # Head out
         head_out_end = current_beat + beats_per_chorus
@@ -492,15 +605,21 @@ def _generate_intro(
     beats = section.total_beats
     tick_offset = section.start_beat * TICKS_PER_QUARTER
 
+    # Generate bass first for sync extraction
     if bass_style == "modal":
         bass_notes = generate_modal_bass(section_chords, beats, swing=swing)
     else:
         bass_notes = generate_two_feel_bass(section_chords, beats, swing=swing)
+    bass_sync = _extract_downbeat_ticks(bass_notes)
+
     if drum_style == "modal":
         drum_notes = generate_modal_drums(beats, intensity=0.2, swing=swing, fill_every=0)
+    elif drum_style == "brushes":
+        drum_notes = generate_brushes_drums(beats, intensity=0.2, swing=swing, fill_every=0)
     else:
         drum_notes = generate_drums(beats, intensity=0.2, swing=swing, fill_every=0)
-    piano_notes = generate_comping(section_chords, beats, intensity=0.2, swing=swing)
+    piano_notes = generate_comping(section_chords, beats, intensity=0.2, swing=swing,
+                                   bass_sync_ticks=bass_sync, context="head")
 
     _offset_notes(bass_notes, int(tick_offset))
     _offset_notes(drum_notes, int(tick_offset))
@@ -528,17 +647,45 @@ def _generate_head(
     tick_offset = section.start_beat * TICKS_PER_QUARTER
 
     melody_notes = generate_head_melody(section_chords, float(beats), swing=swing)
+
+    # Harmonize head melody: add block chords below melody on strong beats
+    melody_notes = harmonize_head_melody(melody_notes, section_chords, beats, swing=swing)
+
+    # Compute per-bar reactive energy from head melody
+    bar_energies = _compute_reactive_energy(melody_notes, beats, section.intensity)
+    bar_feel = _compute_rhythmic_feel(bar_energies, melody_notes, beats)
+
+    # Generate piano first, then extract context for rhythm section
+    piano_notes = generate_comping(section_chords, beats, intensity=section.intensity,
+                                   swing=swing, coltrane=coltrane,
+                                   bass_sync_ticks=[], context="head",
+                                   bar_intensities=bar_energies,
+                                   bar_feel=bar_feel)
+
+    lead_context = _extract_bar_context(melody_notes + piano_notes, beats,
+                                        chords=section_chords)
+
     if bass_style == "modal":
         bass_notes = generate_modal_bass(section_chords, beats, swing=swing)
     else:
         bass_notes = generate_walking_bass(section_chords, beats, swing=swing,
-                                           intensity=section.intensity)
+                                           intensity=section.intensity,
+                                           bar_intensities=bar_energies,
+                                           bar_context=lead_context,
+                                           bar_feel=bar_feel)
+
     if drum_style == "modal":
         drum_notes = generate_modal_drums(beats, intensity=section.intensity, swing=swing, fill_every=8)
+    elif drum_style == "brushes":
+        drum_notes = generate_brushes_drums(beats, intensity=section.intensity, swing=swing,
+                                            fill_every=16,
+                                            bar_intensities=bar_energies,
+                                            bar_context=lead_context,
+                                            bar_feel=bar_feel)
     else:
-        drum_notes = generate_drums(beats, intensity=section.intensity, swing=swing, fill_every=8)
-    piano_notes = generate_comping(section_chords, beats, intensity=section.intensity,
-                                   swing=swing, coltrane=coltrane)
+        drum_notes = generate_drums(beats, intensity=section.intensity, swing=swing, fill_every=8,
+                                    bar_intensities=bar_energies, bar_context=lead_context,
+                                    bar_feel=bar_feel)
 
     _offset_notes(melody_notes, int(tick_offset))
     _offset_notes(bass_notes, int(tick_offset))
@@ -582,26 +729,58 @@ def _generate_solo_section(
         swing=swing,
         coltrane=coltrane,
         seed=solo_seed,
+        intensity=scaled_intensity,
     )
+
+    # Compute per-bar reactive energy from what the melody played
+    bar_energies = _compute_reactive_energy(melody_notes, beats, scaled_intensity)
+    bar_feel = _compute_rhythmic_feel(bar_energies, melody_notes, beats)
+
+    # Generate piano comping first (needs bass sync, but we generate bass after
+    # to give it context). Use empty sync for now — piano doesn't need bass context
+    # as much as bass/drums need melody+piano context.
+    piano_notes = generate_comping(
+        section_chords, beats, intensity=scaled_intensity, swing=swing,
+        coltrane=coltrane, bass_sync_ticks=[], context="solo",
+        bar_intensities=bar_energies,
+        bar_feel=bar_feel,
+    )
+
+    # Extract context from melody + piano for rhythm section reactivity
+    lead_context = _extract_bar_context(melody_notes + piano_notes, beats,
+                                        chords=section_chords)
+
+    # Generate bass with reactive context
     if bass_style == "modal":
         bass_notes = generate_modal_bass(section_chords, beats, swing=swing)
     else:
         bass_notes = generate_walking_bass(section_chords, beats, swing=swing,
-                                           intensity=scaled_intensity)
+                                           intensity=scaled_intensity,
+                                           bar_intensities=bar_energies,
+                                           bar_context=lead_context,
+                                           bar_feel=bar_feel)
+
     if drum_style == "modal":
         drum_notes = generate_modal_drums(
             beats, intensity=scaled_intensity, swing=swing,
             fill_every=4 if scaled_intensity > 0.6 else 8,
         )
+    elif drum_style == "brushes":
+        drum_notes = generate_brushes_drums(
+            beats, intensity=scaled_intensity, swing=swing,
+            fill_every=8 if scaled_intensity > 0.6 else 16,
+            bar_intensities=bar_energies,
+            bar_context=lead_context,
+            bar_feel=bar_feel,
+        )
     else:
         drum_notes = generate_drums(
             beats, intensity=scaled_intensity, swing=swing,
             fill_every=4 if scaled_intensity > 0.6 else 8,
+            bar_intensities=bar_energies,
+            bar_context=lead_context,
+            bar_feel=bar_feel,
         )
-    piano_notes = generate_comping(
-        section_chords, beats, intensity=scaled_intensity, swing=swing,
-        coltrane=coltrane,
-    )
 
     _offset_notes(melody_notes, int(tick_offset))
     _offset_notes(bass_notes, int(tick_offset))
@@ -636,18 +815,31 @@ def _generate_trading_section(
         section_chords, float(beats), intensity=section.intensity,
     )
 
+    bar_energies = _compute_reactive_energy(melody_notes, beats, section.intensity)
+    bar_feel = _compute_rhythmic_feel(bar_energies, melody_notes, beats)
+
+    piano_notes = generate_comping(
+        section_chords, beats, intensity=section.intensity, swing=swing,
+        bass_sync_ticks=[], context="solo",
+        bar_intensities=bar_energies,
+        bar_feel=bar_feel,
+    )
+
+    lead_context = _extract_bar_context(melody_notes + piano_notes, beats,
+                                        chords=section_chords)
+
     if bass_style == "modal":
         bass_notes = generate_modal_bass(section_chords, beats, swing=swing)
     else:
         bass_notes = generate_walking_bass(section_chords, beats, swing=swing,
-                                           intensity=section.intensity)
-    piano_notes = generate_comping(
-        section_chords, beats, intensity=section.intensity, swing=swing,
-    )
+                                           intensity=section.intensity,
+                                           bar_intensities=bar_energies,
+                                           bar_context=lead_context,
+                                           bar_feel=bar_feel)
 
     # Drums: fills during the response bars (bars 5-8 of each 8-bar phrase)
     # and normal pattern during melody bars (bars 1-4)
-    drum_notes = _generate_trading_drums(beats, section.intensity, swing)
+    drum_notes = _generate_trading_drums(beats, section.intensity, swing, drum_style)
 
     _offset_notes(melody_notes, int(tick_offset))
     _offset_notes(bass_notes, int(tick_offset))
@@ -666,6 +858,7 @@ def _generate_trading_drums(
     total_beats: int,
     intensity: float,
     swing: bool,
+    drum_style: str = "swing",
 ) -> List[NoteEvent]:
     """Generate drums for trading fours: comping during melody, fills during response.
 
@@ -676,14 +869,20 @@ def _generate_trading_drums(
     notes: List[NoteEvent] = []
     bar_idx = 0
 
+    def _gen(beats, intens, fill_every=0):
+        if drum_style == "brushes":
+            return generate_brushes_drums(beats, intensity=intens, swing=swing,
+                                          fill_every=fill_every)
+        elif drum_style == "modal":
+            return generate_modal_drums(beats, intensity=intens, swing=swing, fill_every=fill_every)
+        else:
+            return generate_drums(beats, intensity=intens, swing=swing, fill_every=fill_every)
+
     while bar_idx < total_bars:
         # 4-bar phrase: melody plays
         for i in range(min(4, total_bars - bar_idx)):
             bar_beats = 4
-            # Normal comping pattern behind melody
-            bar_notes = generate_drums(
-                bar_beats, intensity=intensity * 0.7, swing=swing, fill_every=0,
-            )
+            bar_notes = _gen(bar_beats, intensity * 0.7)
             _offset_notes(bar_notes, (bar_idx + i) * TICKS_PER_BAR)
             notes.extend(bar_notes)
         bar_idx += 4
@@ -694,11 +893,7 @@ def _generate_trading_drums(
         # 4-bar phrase: drums respond (solo fills)
         for i in range(min(4, total_bars - bar_idx)):
             bar_beats = 4
-            # High-intensity drums for the response
-            bar_notes = generate_drums(
-                bar_beats, intensity=min(1.0, intensity + 0.3), swing=swing,
-                fill_every=2,  # More frequent fills
-            )
+            bar_notes = _gen(bar_beats, min(1.0, intensity + 0.3), fill_every=2)
             _offset_notes(bar_notes, (bar_idx + i) * TICKS_PER_BAR)
             notes.extend(bar_notes)
         bar_idx += 4
@@ -706,94 +901,281 @@ def _generate_trading_drums(
     return notes
 
 
-def _generate_coda(
+def _generate_drum_solo_section(
     section: ArrangementSection,
     chords: List[ChordEvent],
     swing: bool,
+    bass_style: str = "walking",
 ) -> Dict[str, List[NoteEvent]]:
-    """Generate coda: repeats last 4 bars of changes with decreasing intensity.
-
-    Three repetitions of the final 4 bars (or available chords), plus a
-    final sustained chord. The melody sustains the last note.
-    """
+    """Generate drum solo section: drums feature, walking bass continues, piano drops out."""
     section_chords = _chords_for_section(chords, section)
     beats = section.total_beats
     tick_offset = section.start_beat * TICKS_PER_QUARTER
 
-    # Use the last few chords from the section (or all if short)
-    # Generate with decreasing intensity
+    # Drums: full solo
+    drum_notes = generate_drum_solo(beats, intensity=section.intensity, swing=swing)
+
+    # Bass: keep walking to hold the form
+    if bass_style == "modal":
+        bass_notes = generate_modal_bass(section_chords, beats, swing=swing)
+    else:
+        bass_notes = generate_walking_bass(section_chords, beats, swing=swing,
+                                           intensity=0.5)
+
+    _offset_notes(drum_notes, int(tick_offset))
+    _offset_notes(bass_notes, int(tick_offset))
+
+    return {
+        "melody": [],
+        "piano": [],
+        "bass": bass_notes,
+        "drums": drum_notes,
+    }
+
+
+def _generate_bass_solo_section(
+    section: ArrangementSection,
+    chords: List[ChordEvent],
+    swing: bool,
+    drum_style: str = "swing",
+) -> Dict[str, List[NoteEvent]]:
+    """Generate bass solo section: bass features in upper register, light drums, sparse piano."""
+    section_chords = _chords_for_section(chords, section)
+    beats = section.total_beats
+    tick_offset = section.start_beat * TICKS_PER_QUARTER
+
+    # Bass: melodic solo in upper register
+    bass_notes = generate_bass_solo(section_chords, beats, swing=swing,
+                                    intensity=section.intensity)
+
+    # Drums: very light time-keeping
+    if drum_style == "brushes":
+        drum_notes = generate_brushes_drums(beats, intensity=0.3, swing=swing, fill_every=0)
+    else:
+        drum_notes = generate_drums(beats, intensity=0.3, swing=swing, fill_every=0)
+
+    # Piano: very sparse comping (low intensity for space)
+    bass_sync = _extract_downbeat_ticks(bass_notes)
+    piano_notes = generate_comping(
+        section_chords, beats, intensity=0.25, swing=swing,
+        bass_sync_ticks=bass_sync, context="head",
+    )
+
+    _offset_notes(bass_notes, int(tick_offset))
+    _offset_notes(drum_notes, int(tick_offset))
+    _offset_notes(piano_notes, int(tick_offset))
+
+    return {
+        "melody": [],
+        "piano": piano_notes,
+        "bass": bass_notes,
+        "drums": drum_notes,
+    }
+
+
+def _generate_coda(
+    section: ArrangementSection,
+    chords: List[ChordEvent],
+    swing: bool,
+    drum_style: str = "swing",
+) -> Dict[str, List[NoteEvent]]:
+    """Generate coda with jazz ending: wind-down, ritardando, and fermata.
+
+    Structure (4 bars):
+      Bars 1-(N-2): Wind-down with ritardando (lengthening durations, fading)
+      Bar N-1:      Approach — bass walks to root, sparse piano shell, soft drums
+      Bar N:        Fermata — all instruments land on beat 1, rich final chord held long
+    """
+    section_chords = _chords_for_section(chords, section)
+    beats = section.total_beats
+
     melody_notes: List[NoteEvent] = []
     bass_notes: List[NoteEvent] = []
     drum_notes: List[NoteEvent] = []
     piano_notes: List[NoteEvent] = []
 
     coda_bars = beats // 4
-    if coda_bars <= 0:
+    if coda_bars <= 0 or not section_chords:
         return {"melody": [], "piano": [], "bass": [], "drums": []}
 
-    # Split into segments with decreasing intensity
-    bars_done = 0
-    intensities = [0.4, 0.25, 0.15, 0.1]
+    final_chord = section_chords[-1]
+    root_pc = final_chord.root_pc
+    quality = final_chord.quality
+    intervals = CHORD_TONES.get(quality, (0, 4, 7, 10))
+    third_interval = intervals[1] if len(intervals) > 1 else 4
+    fifth_interval = intervals[2] if len(intervals) > 2 else 7
+    seventh_interval = intervals[3] if len(intervals) > 3 else intervals[-1]
 
-    for seg_idx in range(min(coda_bars, len(intensities))):
-        seg_bars = 1
-        seg_beats = seg_bars * 4
-        seg_intensity = intensities[seg_idx]
+    # Bass root in low register
+    bass_root = 36 + root_pc
+    if bass_root < 33:
+        bass_root += 12
 
-        seg_start_beat = section.start_beat + bars_done * 4
-        seg_chords = _chords_for_beat_range(chords, seg_start_beat, seg_start_beat + seg_beats)
+    # ---- Wind-down bars (all except last 2) ----
+    wind_down_bars = max(0, coda_bars - 2)
+    for bar_idx in range(wind_down_bars):
+        intensity = max(0.10, 0.35 - bar_idx * 0.10)
+        rit_factor = 1.0 + bar_idx * 0.15  # ritardando: notes lengthen
+        vel_drop = bar_idx * 8
+
+        seg_start = section.start_beat + bar_idx * 4
+        seg_chords = _chords_for_beat_range(chords, seg_start, seg_start + 4)
         if not seg_chords:
-            seg_chords = section_chords[-1:] if section_chords else []
-        if not seg_chords:
-            bars_done += seg_bars
-            continue
+            seg_chords = [final_chord]
+        seg_tick = int(seg_start * TICKS_PER_QUARTER)
 
-        seg_tick_offset = int((section.start_beat + bars_done * 4) * TICKS_PER_QUARTER)
-
-        # Two-feel bass for ritardando feel
-        b = generate_two_feel_bass(seg_chords, seg_beats, swing=swing)
-        _offset_notes(b, seg_tick_offset)
+        # Two-feel bass with ritardando
+        b = generate_two_feel_bass(seg_chords, 4, swing=swing)
+        _offset_notes(b, seg_tick)
+        for n in b:
+            n.duration_ticks = int(n.duration_ticks * rit_factor)
+            n.velocity = max(20, n.velocity - vel_drop)
         bass_notes.extend(b)
 
-        # Sparse drums, no fills
-        d = generate_drums(seg_beats, intensity=seg_intensity, swing=swing, fill_every=0)
-        _offset_notes(d, int(seg_tick_offset))
-        drum_notes.extend(d)
-
-        # Sparse piano
-        p = generate_comping(seg_chords, seg_beats, intensity=seg_intensity, swing=swing)
-        _offset_notes(p, int(seg_tick_offset))
+        # Sparse piano comping
+        p = generate_comping(seg_chords, 4, intensity=intensity, swing=swing,
+                             context="head")
+        _offset_notes(p, seg_tick)
+        for n in p:
+            n.duration_ticks = int(n.duration_ticks * rit_factor)
+            n.velocity = max(20, n.velocity - vel_drop // 2)
         piano_notes.extend(p)
 
-        bars_done += seg_bars
+        # Light drums
+        if drum_style == "brushes":
+            d = generate_brushes_drums(4, intensity=intensity, swing=swing,
+                                       fill_every=0)
+        elif drum_style == "modal":
+            d = generate_modal_drums(4, intensity=intensity, swing=swing,
+                                     fill_every=0)
+        else:
+            d = generate_drums(4, intensity=intensity, swing=swing, fill_every=0)
+        _offset_notes(d, seg_tick)
+        for n in d:
+            n.velocity = max(15, n.velocity - vel_drop)
+        drum_notes.extend(d)
 
-    # Final sustained melody note: root of the last chord, held for 2 bars
-    if section_chords:
-        final_chord = section_chords[-1]
-        final_root = final_chord.root_pc
-        # Place the sustained note in the melody range
-        final_pitch = 60 + final_root  # Middle-ish register
-        if final_pitch > 84:
-            final_pitch -= 12
-        final_tick = int(tick_offset + max(0, (beats - 8)) * TICKS_PER_QUARTER)
-        melody_notes.append(NoteEvent(
-            pitch=final_pitch,
-            start_tick=final_tick,
-            duration_ticks=8 * TICKS_PER_QUARTER,  # 2 bars sustained
-            velocity=75,
-            channel=0,
+    # ---- Approach bar (penultimate) ----
+    if coda_bars >= 2:
+        approach_bar_idx = coda_bars - 2
+        approach_start = section.start_beat + approach_bar_idx * 4
+        approach_tick = int(approach_start * TICKS_PER_QUARTER)
+
+        # Bass: 5th on beat 1 (long half note) → chromatic approach from below
+        fifth_midi = bass_root + ((fifth_interval) % 12)
+        if fifth_midi > bass_root + 12:
+            fifth_midi -= 12
+        bass_notes.append(NoteEvent(
+            pitch=fifth_midi,
+            start_tick=approach_tick,
+            duration_ticks=int(2.5 * TICKS_PER_QUARTER),
+            velocity=46,
+            channel=2,
+        ))
+        bass_notes.append(NoteEvent(
+            pitch=bass_root - 1,  # chromatic approach from one semitone below
+            start_tick=approach_tick + int(2.5 * TICKS_PER_QUARTER),
+            duration_ticks=int(1.5 * TICKS_PER_QUARTER),
+            velocity=40,
+            channel=2,
         ))
 
-    # Fermata: double the last bass note's duration and sustain last piano chord
-    if bass_notes:
-        bass_notes[-1].duration_ticks *= 2
-    if piano_notes:
-        # Sustain the last few piano notes (the final chord voicing)
-        last_tick = piano_notes[-1].start_tick
-        for n in reversed(piano_notes):
-            if n.start_tick < last_tick - 30:
-                break
-            n.duration_ticks = 4 * TICKS_PER_QUARTER  # Hold for a full bar
+        # Piano: sparse shell voicing (root + 3rd + 7th), held through bar
+        shell_voicing = []
+        for interval in [0, third_interval, seventh_interval]:
+            pc = (root_pc + interval) % 12
+            midi_note = 48 + pc
+            if midi_note > 64:
+                midi_note -= 12
+            shell_voicing.append(midi_note)
+        for pitch in sorted(set(shell_voicing)):
+            piano_notes.append(NoteEvent(
+                pitch=pitch,
+                start_tick=approach_tick,
+                duration_ticks=int(3.5 * TICKS_PER_QUARTER),
+                velocity=34,
+                channel=1,
+            ))
+
+        # Drums: barely there — single soft ride tap
+        drum_notes.append(NoteEvent(
+            pitch=51, start_tick=approach_tick,
+            duration_ticks=TICKS_PER_QUARTER,
+            velocity=22 if drum_style == "brushes" else 26,
+            channel=9,
+        ))
+
+    # ---- Final bar: fermata (the "button") ----
+    final_bar_idx = coda_bars - 1
+    final_start = section.start_beat + final_bar_idx * 4
+    final_tick = int(final_start * TICKS_PER_QUARTER)
+    fermata_ticks = 6 * TICKS_PER_QUARTER  # hold 1.5 bars past the downbeat
+
+    # Right hand (melody): resolve to the 3rd for warmth
+    melody_pc = (root_pc + third_interval) % 12
+    melody_pitch = 72 + melody_pc
+    if melody_pitch > 84:
+        melody_pitch -= 12
+    melody_notes.append(NoteEvent(
+        pitch=melody_pitch,
+        start_tick=final_tick,
+        duration_ticks=fermata_ticks,
+        velocity=60,
+        channel=0,
+    ))
+
+    # Left hand (piano): rich open voicing — root low, 7th mid, 3rd+5th spread
+    low_root = 48 + root_pc
+    if low_root > 55:
+        low_root -= 12
+    final_voicing = [low_root]
+    # 7th above root
+    sev_midi = low_root + seventh_interval
+    if sev_midi > low_root + 12:
+        sev_midi -= 12
+    final_voicing.append(sev_midi)
+    # 3rd spread an octave above root for openness
+    thi_midi = low_root + third_interval + 12
+    if thi_midi > 72:
+        thi_midi -= 12
+    final_voicing.append(thi_midi)
+    # 5th for fullness
+    fif_midi = low_root + fifth_interval
+    if fif_midi < thi_midi:
+        fif_midi += 12
+    if 48 <= fif_midi <= 72:
+        final_voicing.append(fif_midi)
+
+    for pitch in sorted(set(final_voicing)):
+        piano_notes.append(NoteEvent(
+            pitch=pitch,
+            start_tick=final_tick,
+            duration_ticks=fermata_ticks,
+            velocity=44,
+            channel=1,
+        ))
+
+    # Bass: root, held with fermata
+    bass_notes.append(NoteEvent(
+        pitch=bass_root,
+        start_tick=final_tick,
+        duration_ticks=fermata_ticks,
+        velocity=50,
+        channel=2,
+    ))
+
+    # Drums: single cymbal + kick on beat 1
+    if drum_style == "brushes":
+        drum_notes.append(NoteEvent(
+            pitch=51, start_tick=final_tick,
+            duration_ticks=2 * TICKS_PER_QUARTER, velocity=32, channel=9))
+    else:
+        drum_notes.append(NoteEvent(
+            pitch=49, start_tick=final_tick,
+            duration_ticks=2 * TICKS_PER_QUARTER, velocity=50, channel=9))
+    drum_notes.append(NoteEvent(
+        pitch=36, start_tick=final_tick,
+        duration_ticks=TICKS_PER_QUARTER, velocity=36, channel=9))
 
     return {
         "melody": melody_notes,
@@ -854,9 +1236,237 @@ def _chords_for_beat_range(
             duration_beats=clipped_duration,
             key_center_pc=c.key_center_pc,
             function=c.function,
+            form_section=c.form_section,
         ))
 
     return result
+
+
+# ---------------------------------------------------------------------------
+# Bass-piano sync helper
+# ---------------------------------------------------------------------------
+
+
+def _compute_reactive_energy(melody_notes: List[NoteEvent],
+                             total_beats: int,
+                             base_intensity: float) -> List[float]:
+    """Derive per-bar energy values from what the melody just played.
+
+    Creates emergent dynamics: dense bars cause a dip, silence causes a build.
+    Returns one float per bar, clamped to [base*0.5, min(1.0, base*1.5)].
+    """
+    total_bars = total_beats // 4
+    if total_bars <= 0:
+        return []
+
+    # Compute per-bar note counts and avg velocity
+    bar_counts = [0] * total_bars
+    bar_vel_sum = [0.0] * total_bars
+    bar_vel_max = [0] * total_bars
+    for n in melody_notes:
+        bar_idx = n.start_tick // TICKS_PER_BAR
+        if 0 <= bar_idx < total_bars:
+            bar_counts[bar_idx] += 1
+            bar_vel_sum[bar_idx] += n.velocity
+            bar_vel_max[bar_idx] = max(bar_vel_max[bar_idx], n.velocity)
+
+    floor = max(0.15, base_intensity * 0.5)
+    ceil = min(1.0, base_intensity * 1.5)
+    energy = base_intensity
+    result = []
+
+    for i in range(total_bars):
+        if i > 0:
+            prev_count = bar_counts[i - 1]
+            if prev_count > 5:
+                energy -= 0.08   # breathe after dense bar
+            elif prev_count < 1:
+                energy += 0.05   # tension accumulates in silence
+            if bar_vel_max[i - 1] > 100:
+                energy -= 0.03   # recede after loud peak
+
+        # Momentum: slow return toward baseline
+        energy = 0.85 * energy + 0.15 * base_intensity
+        energy = max(floor, min(ceil, energy))
+        result.append(energy)
+
+    return result
+
+
+def _extract_bar_context(notes: List[NoteEvent],
+                         total_beats: int,
+                         chords: list = None) -> List[BarContext]:
+    """Extract per-bar statistics from generated notes for rhythm section reactivity.
+
+    If *chords* (list of ChordEvent) is provided, also computes harmonic fields:
+    chord_count, form_section, and is_key_change per bar.
+    """
+    total_bars = total_beats // 4
+    if total_bars <= 0:
+        return []
+
+    bar_notes: List[List[NoteEvent]] = [[] for _ in range(total_bars)]
+    for n in notes:
+        idx = n.start_tick // TICKS_PER_BAR
+        if 0 <= idx < total_bars:
+            bar_notes[idx].append(n)
+
+    # Pre-compute per-bar chord info if chords provided
+    bar_chord_counts = [0] * total_bars
+    bar_form_sections = [""] * total_bars
+    bar_key_change = [False] * total_bars
+    if chords:
+        for bar_idx in range(total_bars):
+            bar_start = bar_idx * 4.0
+            bar_end = bar_start + 4.0
+            keys_in_bar = set()
+            first_section = ""
+            count = 0
+            for c in chords:
+                # Chord overlaps this bar if it starts before bar_end and ends after bar_start
+                if c.start_beat < bar_end and c.end_beat > bar_start:
+                    count += 1
+                    if not first_section and c.form_section:
+                        first_section = c.form_section
+                    keys_in_bar.add(c.key_center_pc)
+            bar_chord_counts[bar_idx] = max(count, 1)
+            bar_form_sections[bar_idx] = first_section
+            bar_key_change[bar_idx] = len(keys_in_bar) > 1
+
+    # Find max note count for normalization
+    max_count = max((len(bn) for bn in bar_notes), default=1) or 1
+
+    result = []
+    for i, bn in enumerate(bar_notes):
+        count = len(bn)
+        density = count / max_count
+        avg_vel = sum(n.velocity for n in bn) / count if count else 70.0
+        avg_reg = sum(n.pitch for n in bn) / count if count else 65.0
+        result.append(BarContext(
+            density=density,
+            avg_velocity=avg_vel,
+            avg_register=avg_reg,
+            has_silence=(count < 1),
+            chord_count=bar_chord_counts[i],
+            form_section=bar_form_sections[i],
+            is_key_change=bar_key_change[i],
+        ))
+    return result
+
+
+def _compute_rhythmic_feel(bar_energies: List[float],
+                           melody_notes: List[NoteEvent],
+                           total_beats: int) -> List[BarFeel]:
+    """Derive per-bar timing feel from musical context.
+
+    Building phrases push ahead; resolving phrases lay back.
+    High energy = tight timing; low energy = loose/rubato.
+    """
+    total_bars = total_beats // 4
+    if total_bars <= 0:
+        return []
+
+    # Compute per-bar note counts for density trend detection
+    bar_counts = [0] * total_bars
+    for n in melody_notes:
+        idx = n.start_tick // TICKS_PER_BAR
+        if 0 <= idx < total_bars:
+            bar_counts[idx] += 1
+
+    result = []
+    for i in range(total_bars):
+        energy = bar_energies[i] if i < len(bar_energies) else 0.5
+
+        # Offset bias: density trend determines push/pull
+        if i > 0:
+            delta = bar_counts[i] - bar_counts[i - 1]
+            if delta > 2:
+                offset_bias = min(0.6, 0.3 + delta * 0.05)   # building → push
+            elif delta < -2:
+                offset_bias = max(-0.5, -0.3 + delta * 0.05)  # resolving → lay back
+            else:
+                offset_bias = 0.0
+        else:
+            offset_bias = 0.0
+
+        # Timing spread: high energy = tight, low = loose
+        timing_spread = max(0.5, min(1.5, 1.4 - energy * 0.6))
+
+        # Swing depth: higher energy = deeper swing
+        swing_depth = max(0.8, min(1.2, 0.9 + energy * 0.2))
+
+        result.append(BarFeel(
+            offset_bias=offset_bias,
+            timing_spread=timing_spread,
+            swing_depth=swing_depth,
+        ))
+    return result
+
+
+def _extract_downbeat_ticks(bass_notes: List[NoteEvent]) -> List[int]:
+    """Return tick positions of bass notes on beats 1 or 3.
+
+    Used to synchronize piano comping with walking bass for the
+    Bill Evans-style rhythmic lock.
+    """
+    sync_ticks = []
+    for note in bass_notes:
+        pos_in_bar = note.start_tick % TICKS_PER_BAR
+        # Beat 1: near tick 0 of bar; Beat 3: near 2*TICKS_PER_QUARTER
+        if pos_in_bar < 30 or abs(pos_in_bar - 2 * TICKS_PER_QUARTER) < 30:
+            sync_ticks.append(note.start_tick)
+    return sorted(sync_ticks)
+
+
+# ---------------------------------------------------------------------------
+# Stereo pan movement
+# ---------------------------------------------------------------------------
+
+# Default pan positions (must match writer.py DEFAULT_PAN)
+_DEFAULT_PAN = {"melody": 45, "piano": 82, "bass": 58, "drums": 70}
+
+# Alternate pan targets for dramatic shifts
+_PAN_SHIFTS = {
+    # section_name → {track: shifted_pan}  (only tracks that move)
+    "solo":       {"melody": 85, "piano": 38},   # Solo: melody slides right, comping left
+    "trading":    {"melody": 64, "piano": 64},    # Trading: both converge to center
+    "drum_solo":  {"bass": 40, "drums": 64},      # Drum solo: drums to center, bass left
+    "bass_solo":  {"bass": 64, "melody": 35},     # Bass solo: bass to center, melody far left
+}
+
+
+def _generate_pan_shifts(
+    arrangement: List[ArrangementSection],
+    cc_events: Dict[str, list],
+) -> None:
+    """Insert CC10 pan events at section boundaries for stereo movement.
+
+    At the start of sections with alternate pan targets, smoothly shift
+    the relevant tracks. At head/coda sections, restore defaults.
+    Modifies cc_events in place.
+    """
+    for section in arrangement:
+        tick = int(section.start_beat * TICKS_PER_QUARTER)
+
+        # Determine which pan map to use for this section
+        if section.is_solo:
+            pan_map = _PAN_SHIFTS["solo"]
+        elif section.is_trading:
+            pan_map = _PAN_SHIFTS["trading"]
+        elif section.is_drum_solo:
+            pan_map = _PAN_SHIFTS["drum_solo"]
+        elif section.is_bass_solo:
+            pan_map = _PAN_SHIFTS["bass_solo"]
+        else:
+            # Head, intro, coda: restore defaults
+            pan_map = _DEFAULT_PAN
+
+        for track_name, pan_val in pan_map.items():
+            ch_map = {"melody": 0, "piano": 1, "bass": 2, "drums": 9}
+            ch = ch_map.get(track_name, 0)
+            cc_events.setdefault(track_name, []).append(
+                CCEvent(cc_number=10, value=pan_val, start_tick=tick, channel=ch)
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -878,7 +1488,6 @@ def generate_arrangement(
     bass_style: str = "walking",
     drum_style: str = "swing",
     reharmonize_density: str = "off",
-    lead_instrument: str = "trumpet",
 ) -> Dict[str, List[NoteEvent]]:
     """Generate the full arrangement by orchestrating all instrument generators.
 
@@ -955,22 +1564,63 @@ def generate_arrangement(
                 section, section_chords, tension_curve, swing, coltrane, seed,
                 density_scale, bass_style, drum_style,
             )
+        elif section.is_drum_solo:
+            section_notes = _generate_drum_solo_section(section, section_chords, swing,
+                                                        bass_style)
+        elif section.is_bass_solo:
+            section_notes = _generate_bass_solo_section(section, section_chords, swing,
+                                                        drum_style)
         elif section.is_trading:
             section_notes = _generate_trading_section(section, section_chords, swing,
                                                       bass_style, drum_style)
         elif section.name == "coda":
-            section_notes = _generate_coda(section, section_chords, swing)
+            section_notes = _generate_coda(section, section_chords, swing, drum_style)
         else:
             section_notes = _generate_head(section, section_chords, swing,
                                            coltrane, bass_style, drum_style)
 
+        # Clip notes to section boundaries — prevents bleed into next section
+        sec_end_tick = int(section.end_beat * TICKS_PER_QUARTER)
+        for track_name in section_notes:
+            section_notes[track_name] = [
+                n for n in section_notes[track_name] if n.start_tick < sec_end_tick
+            ]
+
         _merge_tracks(tracks, section_notes)
 
-    # Piano trio mode: when lead is piano, drop the comping track entirely.
-    # A real piano trio (Bill Evans, etc.) has one pianist doing both melody
-    # and comping — not two keyboards.
-    if lead_instrument == "piano":
-        tracks["piano"] = []
+    # Two-handed piano: melody = right hand (ch 0), piano = left hand (ch 1)
+    cc_events: Dict[str, list] = {}
+
+    # Sustain pedal for left hand (comping voicings) on channel 1
+    cc_events["piano"] = generate_sustain_pedal(tracks["piano"], channel=1)
+
+    # Set channels explicitly
+    for note in tracks["melody"]:
+        note.channel = 0
+    for note in tracks["piano"]:
+        note.channel = 1
+
+    # Generate expression data (pitch bends + additional CCs)
+    bass_bends, bass_expr_ccs = generate_bass_expression(tracks["bass"], chords, channel=2)
+    melody_bends, melody_expr_ccs = generate_melody_expression(tracks["melody"], chords, channel=0)
+    hihat_ccs = generate_hihat_expression(tracks["drums"], channel=9)
+
+    pitch_bend_events: Dict[str, list] = {}
+    if bass_bends:
+        pitch_bend_events["bass"] = bass_bends
+    if melody_bends:
+        pitch_bend_events["melody"] = melody_bends
+
+    # Merge expression CCs into cc_events
+    if bass_expr_ccs:
+        cc_events.setdefault("bass", []).extend(bass_expr_ccs)
+    if melody_expr_ccs:
+        cc_events.setdefault("melody", []).extend(melody_expr_ccs)
+    if hihat_ccs:
+        cc_events.setdefault("drums", []).extend(hihat_ccs)
+
+    # Stereo pan shifts at section boundaries for dramatic movement
+    _generate_pan_shifts(arrangement, cc_events)
 
     # Post-processing: humanization — per-section intensity for musical feel
     if humanize:
@@ -1008,4 +1658,4 @@ def generate_arrangement(
     for track_name in tracks:
         tracks[track_name].sort(key=lambda n: n.start_tick)
 
-    return tracks
+    return tracks, cc_events, pitch_bend_events
