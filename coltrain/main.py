@@ -135,6 +135,12 @@ def parse_args(argv=None):
         default="midi",
         help="Output format: midi (default), wav, or mp3 (requires numpy/scipy/soundfile)",
     )
+    parser.add_argument(
+        "--meter",
+        choices=["4/4", "5/4", "7/4"],
+        default="4/4",
+        help="Time signature (default: 4/4). Odd meters use dedicated modal forms.",
+    )
 
     return parser.parse_args(argv)
 
@@ -160,6 +166,11 @@ def main(argv=None):
     if args.seed is not None:
         random.seed(args.seed)
 
+    # Parse meter
+    meter_parts = args.meter.split("/")
+    beats_per_bar = int(meter_parts[0])
+    time_sig = (beats_per_bar, int(meter_parts[1]))
+
     # Get form info
     form_name = args.form
     form_info = FORM_TEMPLATES[form_name]
@@ -170,11 +181,12 @@ def main(argv=None):
     # Build arrangement structure
     arrangement = build_arrangement(form_name, num_choruses, bars_per_chorus,
                                     drum_solo=args.drum_solo,
-                                    bass_solo=args.bass_solo)
+                                    bass_solo=args.bass_solo,
+                                    beats_per_bar=beats_per_bar)
 
     # Calculate total beats from the arrangement
     total_beats = max(s.end_beat for s in arrangement)
-    total_bars = total_beats // 4
+    total_bars = total_beats // beats_per_bar
 
     # Build chord progression covering the full arrangement
     # The intro uses the last 4 bars of changes, head uses full form, etc.
@@ -182,6 +194,7 @@ def main(argv=None):
     all_chords = _build_full_chord_progression(
         form_name, key_pc, arrangement, bars_per_chorus,
         coltrane=args.coltrane,
+        beats_per_bar=beats_per_bar,
     )
 
     # Coltrane defaults: auto-enable certain features
@@ -202,6 +215,8 @@ def main(argv=None):
     print(f"  Swing:      {args.swing:.3f}")
     print(f"  Bass:       {args.bass_style}")
     print(f"  Drums:      {args.drum_style}")
+    if beats_per_bar != 4:
+        print(f"  Meter:      {args.meter}")
     print(f"  Humanize:   {'on' if do_humanize else 'off'}")
     if reharmonize_density != "off":
         print(f"  Reharmonize: {reharmonize_density}")
@@ -230,6 +245,7 @@ def main(argv=None):
         bass_style=args.bass_style,
         drum_style=args.drum_style,
         reharmonize_density=reharmonize_density,
+        beats_per_bar=beats_per_bar,
     )
 
     # Count total notes
@@ -240,6 +256,7 @@ def main(argv=None):
     notes_written = write_midi(
         tracks, args.output, tempo=tempo, lead_instrument="piano",
         cc_events=cc_events, pitch_bend_events=pitch_bend_events,
+        time_sig=time_sig,
     )
 
     print(f"Saved: {args.output} ({total_bars} bars, {total_notes} notes)")
@@ -276,6 +293,7 @@ def _build_full_chord_progression(
     arrangement: list,
     bars_per_chorus: int,
     coltrane: bool = False,
+    beats_per_bar: int = 4,
 ) -> list:
     """Build a chord progression that covers the entire arrangement.
 
@@ -303,9 +321,10 @@ def _build_full_chord_progression(
             full_chorus = build_chord_progression(
                 form_name, key_pc, num_choruses=1, start_beat=0, coltrane=coltrane,
             )
-            # Take the last 4 bars (16 beats) worth of chords
-            total_form_beats = bars_per_chorus * 4
-            intro_start_in_form = max(0, total_form_beats - 16)
+            # Take the last 4 bars worth of chords
+            total_form_beats = bars_per_chorus * beats_per_bar
+            intro_beats = 4 * beats_per_bar
+            intro_start_in_form = max(0, total_form_beats - intro_beats)
 
             for c in full_chorus:
                 c_end = c.start_beat + c.duration_beats
@@ -331,8 +350,9 @@ def _build_full_chord_progression(
             full_chorus = build_chord_progression(
                 form_name, key_pc, num_choruses=1, start_beat=0, coltrane=coltrane,
             )
-            total_form_beats = bars_per_chorus * 4
-            coda_start_in_form = max(0, total_form_beats - 16)
+            total_form_beats = bars_per_chorus * beats_per_bar
+            coda_beats = 4 * beats_per_bar
+            coda_start_in_form = max(0, total_form_beats - coda_beats)
 
             for c in full_chorus:
                 c_end = c.start_beat + c.duration_beats

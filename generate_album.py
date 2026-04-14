@@ -59,7 +59,20 @@ def generate_tracklist(num_tracks, album_dir, album_seed=None, style=None):
     random.shuffle(form_bag)
 
     for i in range(num_tracks):
-        if style == "giantsteps":
+        # --- Meter selection: ~15% chance of odd meter ---
+        meter = "4/4"
+        if style not in ("giantsteps", "coltrain"):
+            r_meter = random.random()
+            if r_meter < 0.10:
+                meter = "5/4"
+            elif r_meter < 0.15:
+                meter = "7/4"
+
+        if meter == "5/4":
+            form = "modal_5"
+        elif meter == "7/4":
+            form = "modal_7"
+        elif style == "giantsteps":
             form = "giantsteps"
         elif style == "coltrain":
             form = "coltrain"
@@ -77,7 +90,11 @@ def generate_tracklist(num_tracks, album_dir, album_seed=None, style=None):
         key = random.choice(KEYS)
 
         # Tempo: form-appropriate ranges
-        if style == "giantsteps":
+        if meter == "5/4":
+            tempo = random.randint(130, 175)
+        elif meter == "7/4":
+            tempo = random.randint(100, 150)
+        elif style == "giantsteps":
             tempo = random.randint(130, 170)
         elif form == "giantsteps":
             tempo = random.randint(130, 170)
@@ -108,8 +125,10 @@ def generate_tracklist(num_tracks, album_dir, album_seed=None, style=None):
         else:
             reharm = random.choice(["off", "off", "light", "medium"])
 
-        # Coltrane mode
-        if style == "giantsteps":
+        # Coltrane mode — disabled for odd meters (too complex)
+        if meter != "4/4":
+            coltrane = False
+        elif style == "giantsteps":
             coltrane = True
         elif form == "coltrain":
             coltrane = random.random() < 0.6  # 60% chance — bridge has its own modulations
@@ -117,7 +136,10 @@ def generate_tracklist(num_tracks, album_dir, album_seed=None, style=None):
             coltrane = form == "giantsteps" or (reharm == "heavy" and random.random() < 0.5)
 
         # Drum style — piano trio defaults to brushes (stirring, intimate texture)
-        if tempo >= 170:
+        # Odd meters: always brushes (intimate, Take Five feel)
+        if meter != "4/4":
+            drum_style = "brushes"
+        elif tempo >= 170:
             # Very fast tempos: swing sticks sound better
             drum_style = "swing"
         elif tempo >= 150:
@@ -152,6 +174,7 @@ def generate_tracklist(num_tracks, album_dir, album_seed=None, style=None):
             "drum_solo": False,
             "bass_solo": False,
             "seed": track_seed,
+            "meter": meter,
         })
 
     # Assign drum and bass solos to specific tracks for variety
@@ -216,6 +239,8 @@ def main():
             args += ["--drum-solo"]
         if track.get("bass_solo"):
             args += ["--bass-solo"]
+        if track.get("meter", "4/4") != "4/4":
+            args += ["--meter", track["meter"]]
         args += ["-o", output]
 
         print(f"\n{'~'*60}")
@@ -227,6 +252,9 @@ def main():
             extras.append("drum solo")
         if track.get("bass_solo"):
             extras.append("bass solo")
+        meter_str = track.get("meter", "4/4")
+        if meter_str != "4/4":
+            extras.append(meter_str)
         extras_str = ", " + ", ".join(extras) if extras else ""
         print(f"  {track['form']} in {track['key']} @ {track['tempo']} BPM"
               f"  (piano, {track['tension']}, {track['drum_style']}{extras_str})")
