@@ -11,7 +11,7 @@ import random
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
-from coltrain.generation import NoteEvent, CCEvent, PitchBendEvent, BarFeel, TICKS_PER_QUARTER, TICKS_PER_8TH, TICKS_PER_16TH, TICKS_PER_BAR
+from coltrain.generation import NoteEvent, CCEvent, PitchBendEvent, BarFeel, TICKS_PER_QUARTER, TICKS_PER_8TH, TICKS_PER_16TH, TICKS_PER_BAR, ticks_per_bar
 
 # Module-level rhythmic feel state (set per phrase in generator loop)
 _current_feel: Optional[BarFeel] = None
@@ -250,6 +250,41 @@ class SoloNarrative:
 
 
 @dataclass
+class RunBlueprint:
+    """Pre-planned architectural unit for a Tatum-style run."""
+    purpose: str              # "bridge", "fill", "climax", "ornament", "turnaround"
+    start_beat: float         # Where the run begins
+    end_beat: float           # Where the target note lands
+    target_pitch: int         # Guide tone of destination chord
+    contour: str              # "sweep_up", "sweep_down", "arc_up_down", "arc_down_up", "cascade"
+    scale_materials: List[Tuple[float, int, str]]  # [(beat_boundary, root_pc, quality), ...]
+    timing_profile: str       # "decelerate", "accelerate", "even"
+    intensity: float          # 0.0-1.0
+    two_handed: bool = False
+    executed: bool = False
+
+
+@dataclass
+class RunPlan:
+    """Collection of pre-planned runs for one solo chorus."""
+    blueprints: List[RunBlueprint] = field(default_factory=list)
+
+    def get_active_run(self, beat: float) -> Optional[RunBlueprint]:
+        """Return un-executed blueprint where start_beat <= beat+0.5 and beat < end_beat."""
+        for bp in self.blueprints:
+            if not bp.executed and bp.start_beat <= beat + 0.5 and beat < bp.end_beat:
+                return bp
+        return None
+
+    def get_upcoming_run(self, beat: float, lookahead: float = 2.0) -> Optional[RunBlueprint]:
+        """Return next un-executed blueprint within lookahead beats."""
+        for bp in self.blueprints:
+            if not bp.executed and bp.start_beat > beat and bp.start_beat <= beat + lookahead:
+                return bp
+        return None
+
+
+@dataclass
 class _SoloState:
     """Mutable state carried across phrase boundaries during solo generation."""
     pitch: int
@@ -268,6 +303,10 @@ class _SoloState:
     last_target_was_third: bool = False
     phrase_buffer: List[_PhraseMemo] = field(default_factory=list)
     callback_count: int = 0
+    # --- Run blueprint fields (v13) ---
+    run_plan: Optional[RunPlan] = None
+    runs_executed: int = 0
+    last_run_end_beat: float = -999.0
     # --- Narrative context fields (Solo Narrative Planner v6) ---
     narrative: Optional[SoloNarrative] = None
     phrase_length_history: List[float] = field(default_factory=list)
@@ -283,6 +322,8 @@ class _SoloState:
     phrase_cell_history: List[Tuple] = field(default_factory=list)
     _last_contour: str = ""                  # Last phrase's contour (for continuation/contrast)
     last_run_direction: Optional[int] = None  # Set after scalar/chromatic/arpeggio runs end
+    beats_per_bar: int = 4  # Meter (4 for 4/4, 5 for 5/4, 7 for 7/4)
+    harmonic_rhythm_speed: float = 0.0  # 0.0 = slow (≥3 beats), 1.0 = fast (≤1 beat)
 
     # --- Narrative context methods ---
     def record_phrase_length(self, length: float):
@@ -627,6 +668,271 @@ def _plan_solo_narrative(chords: List[ChordEvent], total_beats: float,
         climax_beat=climax_beat,
         total_beats=total_beats,
     )
+
+
+# ---------------------------------------------------------------------------
+# Run Blueprint Planner (v13) -- pre-composed Tatum-style run opportunities
+# ---------------------------------------------------------------------------
+
+
+def _plan_run_opportunities(chords: List[ChordEvent],
+                            narrative: SoloNarrative,
+                            total_beats: float,
+                            intensity: float,
+                            curve: 'TensionCurve') -> RunPlan:
+    """Scan chords and narrative to identify 3-8 run opportunities per solo.
+
+    5 opportunity types:
+    1. Bridge — before a major chord change
+    2. Fill — after narrative silence phrases
+    3. Climax — at the narrative climax beat
+    4. Turnaround — before form section returns to "A"
+    5. Section boundary — at harmonic landmarks
+    """
+    if not chords or total_beats <= 0:
+        return RunPlan()
+
+    opportunities: List[RunBlueprint] = []
+
+    # Helper: estimate register at a given solo progress position
+    def _est_register(progress: float) -> float:
+        """Return estimated MIDI pitch at this solo position (55-84 range)."""
+        climax_progress = narrative.climax_beat / max(1.0, total_beats)
+        if progress < climax_progress:
+            reg = 0.4 + 0.5 * (progress / max(0.01, climax_progress))
+        else:
+            remaining = 1.0 - climax_progress
+            reg = 0.9 - 0.5 * ((progress - climax_progress) / max(0.01, remaining))
+        reg = max(0.2, min(0.95, reg))
+        return int(MELODY_LOW_BASE + reg * (MELODY_HIGH_BASE - MELODY_LOW_BASE))
+
+    def _closest_guide_tone(target_pitch: int, root_pc: int, quality: str) -> int:
+        """Find the closest guide tone (3rd or 7th) to a target pitch."""
+        guides = _guide_tones_in_range(root_pc, quality,
+                                       MELODY_LOW_EXTREME, MELODY_HIGH_EXTREME)
+        if not guides:
+            return target_pitch
+        return min(guides, key=lambda g: abs(g - target_pitch))
+
+    def _build_scale_materials(start_beat: float, end_beat: float) -> List[Tuple[float, int, str]]:
+        """Build chord-based scale material list for a run span."""
+        materials = []
+        for c in chords:
+            if c.end_beat <= start_beat:
+                continue
+            if c.start_beat >= end_beat:
+                break
+            boundary = max(start_beat, c.start_beat)
+            materials.append((boundary, c.root_pc, c.quality))
+        if not materials:
+            # Fallback to chord at start
+            ch = _get_chord_at_beat(chords, start_beat)
+            if ch:
+                materials.append((start_beat, ch.root_pc, ch.quality))
+        return materials
+
+    def _contour_for_direction(source_est: int, target: int) -> str:
+        if target > source_est + 3:
+            return "sweep_up"
+        elif target < source_est - 3:
+            return "sweep_down"
+        return "arc_up_down"
+
+    # 1. Bridge runs — before major chord changes
+    for i, c in enumerate(chords):
+        if c.start_beat < 8.0 or c.start_beat > total_beats - 4.0:
+            continue
+        prev = _get_chord_at_beat(chords, c.start_beat - 0.1)
+        if prev is None or prev.root_pc == c.root_pc:
+            continue
+        # Check tension gate
+        progress = c.start_beat / total_beats
+        t = curve(progress) * intensity
+        if t < 0.3:
+            continue
+        # Run starts 1.5-3 beats before chord change, lands on beat 1 of new chord
+        run_dur = min(3.0, max(1.5, c.duration_beats * 0.75))
+        start_b = c.start_beat - run_dur
+        if start_b < 0:
+            continue
+        est_reg = _est_register(start_b / total_beats)
+        target_p = _closest_guide_tone(est_reg, c.root_pc, c.quality)
+        contour = _contour_for_direction(est_reg, target_p)
+        materials = _build_scale_materials(start_b, c.start_beat + 0.5)
+        # Bridge runs over dom7: 30% chance to inject tritone sub material
+        if prev.quality in ("dom7", "7", "dom7alt") and len(materials) > 0:
+            tritone_root = (prev.root_pc + 6) % 12
+            # Insert at midpoint
+            mid_beat = (start_b + c.start_beat) / 2
+            if hash((start_b, prev.root_pc)) % 10 < 3:
+                materials.insert(len(materials) // 2,
+                                 (mid_beat, tritone_root, "dom7"))
+        timing = "decelerate" if hash((start_b, c.root_pc)) % 5 < 3 else "even"
+        opportunities.append(RunBlueprint(
+            purpose="bridge", start_beat=start_b, end_beat=c.start_beat + 0.5,
+            target_pitch=target_p, contour=contour,
+            scale_materials=materials, timing_profile=timing,
+            intensity=min(1.0, t + 0.1),
+            two_handed=(t > 0.7),
+        ))
+
+    # 2. Fill runs — after narrative silence phrases
+    for idx, intn in enumerate(narrative.intentions):
+        if intn.character != PC_SILENCE:
+            continue
+        # Estimate the beat where silence ends
+        est_beat = (idx / max(1, len(narrative.intentions) - 1)) * total_beats
+        fill_start = est_beat + intn.silence_after
+        if fill_start < 8.0 or fill_start > total_beats - 4.0:
+            continue
+        fill_end = fill_start + min(2.5, max(1.5, intn.silence_after))
+        if fill_end > total_beats - 4.0:
+            continue
+        progress = fill_start / total_beats
+        t = curve(progress) * intensity
+        est_reg = _est_register(progress)
+        ch = _get_chord_at_beat(chords, fill_end)
+        if ch is None:
+            continue
+        target_p = _closest_guide_tone(est_reg, ch.root_pc, ch.quality)
+        contour = "sweep_up" if hash(idx) % 2 == 0 else "sweep_down"
+        materials = _build_scale_materials(fill_start, fill_end)
+        opportunities.append(RunBlueprint(
+            purpose="fill", start_beat=fill_start, end_beat=fill_end,
+            target_pitch=target_p, contour=contour,
+            scale_materials=materials, timing_profile="accelerate",
+            intensity=min(1.0, t + 0.05),
+        ))
+
+    # 3. Climax run — at the narrative climax beat
+    if narrative.climax_beat > 8.0 and narrative.climax_beat < total_beats - 4.0:
+        climax_progress = narrative.climax_beat / total_beats
+        t = curve(climax_progress) * intensity
+        if t > 0.6:
+            run_dur = min(6.0, max(3.0, t * 5.0))
+            start_b = narrative.climax_beat - run_dur * 0.6
+            end_b = narrative.climax_beat + run_dur * 0.4
+            if start_b >= 8.0:
+                est_reg = _est_register(climax_progress)
+                ch = _get_chord_at_beat(chords, narrative.climax_beat)
+                if ch:
+                    target_p = _closest_guide_tone(
+                        est_reg + 8, ch.root_pc, ch.quality)  # aim high for climax
+                    materials = _build_scale_materials(start_b, end_b)
+                    opportunities.append(RunBlueprint(
+                        purpose="climax", start_beat=start_b, end_beat=end_b,
+                        target_pitch=target_p, contour="cascade",
+                        scale_materials=materials, timing_profile="even",
+                        intensity=min(1.0, t + 0.15),
+                        two_handed=True,
+                    ))
+
+    # 4. Turnaround runs — last 2-4 beats before form returns to "A"
+    for beat_pos, kind in narrative.harmonic_landmarks:
+        if kind != "section_boundary":
+            continue
+        if beat_pos < 8.0 or beat_pos > total_beats - 4.0:
+            continue
+        # Check if the section at this boundary is "A" (return)
+        ch_at = _get_chord_at_beat(chords, beat_pos)
+        if ch_at is None or ch_at.form_section != "A":
+            continue
+        progress = beat_pos / total_beats
+        t = curve(progress) * intensity
+        if t < 0.3:
+            continue
+        run_dur = min(4.0, max(2.0, t * 3.0))
+        start_b = beat_pos - run_dur
+        if start_b < 0:
+            continue
+        est_reg = _est_register(progress)
+        target_p = _closest_guide_tone(est_reg, ch_at.root_pc, ch_at.quality)
+        materials = _build_scale_materials(start_b, beat_pos + 0.5)
+        opportunities.append(RunBlueprint(
+            purpose="turnaround", start_beat=start_b, end_beat=beat_pos + 0.5,
+            target_pitch=target_p, contour="arc_down_up",
+            scale_materials=materials, timing_profile="decelerate",
+            intensity=min(1.0, t + 0.1),
+        ))
+
+    # 5. Section boundary — connective tissue at harmonic landmarks
+    for beat_pos, kind in narrative.harmonic_landmarks:
+        if kind not in ("section_boundary", "key_change"):
+            continue
+        if beat_pos < 8.0 or beat_pos > total_beats - 4.0:
+            continue
+        # Avoid duplicate with turnaround (already targeting A returns)
+        ch_at = _get_chord_at_beat(chords, beat_pos)
+        if ch_at and ch_at.form_section == "A":
+            continue  # already covered by turnaround
+        progress = beat_pos / total_beats
+        t = curve(progress) * intensity
+        if t < 0.3:
+            continue
+        run_dur = min(2.5, max(1.5, t * 2.0))
+        start_b = beat_pos - run_dur
+        if start_b < 0:
+            continue
+        est_reg = _est_register(progress)
+        if ch_at:
+            target_p = _closest_guide_tone(est_reg, ch_at.root_pc, ch_at.quality)
+        else:
+            target_p = est_reg
+        materials = _build_scale_materials(start_b, beat_pos + 0.5)
+        opportunities.append(RunBlueprint(
+            purpose="boundary", start_beat=start_b, end_beat=beat_pos + 0.5,
+            target_pitch=target_p, contour="sweep_down",
+            scale_materials=materials, timing_profile="decelerate",
+            intensity=min(1.0, t),
+        ))
+
+    # --- Filtering ---
+    # Sort by start_beat
+    opportunities.sort(key=lambda bp: bp.start_beat)
+
+    # Suppress during whisper/silence narrative intentions
+    intention_beats = []
+    for idx, intn in enumerate(narrative.intentions):
+        if intn.character in (PC_WHISPER, PC_SILENCE):
+            est_beat = (idx / max(1, len(narrative.intentions) - 1)) * total_beats
+            intention_beats.append((est_beat, est_beat + intn.phrase_beats_hint + intn.silence_after))
+
+    filtered = []
+    for bp in opportunities:
+        # No runs in first 8 beats or last 4 beats
+        if bp.start_beat < 8.0 or bp.end_beat > total_beats - 4.0:
+            continue
+        # Clamp end_beat to total
+        if bp.end_beat > total_beats:
+            bp.end_beat = total_beats
+        if bp.end_beat - bp.start_beat < 1.0:
+            continue
+        # Check whisper/silence suppression
+        suppressed = False
+        for ws_start, ws_end in intention_beats:
+            if bp.start_beat < ws_end and bp.end_beat > ws_start:
+                suppressed = True
+                break
+        if suppressed:
+            continue
+        filtered.append(bp)
+
+    # Min spacing: no two runs within 8 beats
+    selected: List[RunBlueprint] = []
+    for bp in filtered:
+        if selected and bp.start_beat - selected[-1].end_beat < 8.0:
+            continue
+        selected.append(bp)
+
+    # Cap at 8 runs, keep best variety by purpose
+    if len(selected) > 8:
+        # Prioritize: climax first, then bridge, turnaround, boundary, fill
+        priority = {"climax": 0, "bridge": 1, "turnaround": 2, "boundary": 3, "fill": 4}
+        selected.sort(key=lambda bp: (priority.get(bp.purpose, 5), bp.start_beat))
+        selected = selected[:8]
+        selected.sort(key=lambda bp: bp.start_beat)
+
+    return RunPlan(blueprints=selected)
 
 
 def _generate_callback_phrase(memo: _PhraseMemo, current_beat: float,
@@ -1091,6 +1397,43 @@ def _choose_target_pitch_core(current_pitch: int, root_pc: int, quality: str,
             target_closeness = max(0.0, 1.0 - abs(c - vl_target_pitch) / 12.0)
             score += 30.0 * proximity * target_closeness
 
+        # 12. Fast harmonic rhythm: chord-tone arpeggiation bias
+        hr_speed = state.harmonic_rhythm_speed if state else 0.0
+        if hr_speed > 0.1:
+            if c in chord_tones_set:
+                score += 8.0 * hr_speed
+            if c in guide_tones_set:
+                score += 6.0 * hr_speed
+            # 3rd-based motion bonus (Giant Steps cell: m3/M3)
+            if abs_interval in (3, 4):
+                score += 10.0 * hr_speed
+            elif abs_interval > 7:
+                score -= 5.0 * hr_speed
+
+        # 13. Interval anti-repetition: penalize oscillation patterns
+        if last_intervals:
+            candidate_interval = interval
+            last_iv = last_intervals[-1]
+            # Exact same interval: -6
+            if candidate_interval == last_iv:
+                score -= 6.0
+            # Same magnitude, any direction (bouncing): -3
+            elif abs(candidate_interval) == abs(last_iv) and abs(candidate_interval) >= 3:
+                score -= 3.0
+            # Oscillation: A, -A, A pattern: -12
+            if len(last_intervals) >= 2:
+                prev_prev_iv = last_intervals[-2]
+                if (candidate_interval == prev_prev_iv
+                        and last_iv == -prev_prev_iv
+                        and abs(candidate_interval) >= 3):
+                    score -= 12.0
+                # Near-oscillation (similar magnitudes bouncing): -8
+                elif (abs(abs(candidate_interval) - abs(prev_prev_iv)) <= 1
+                      and (candidate_interval > 0) == (prev_prev_iv > 0)
+                      and (last_iv > 0) != (candidate_interval > 0)
+                      and abs(candidate_interval) >= 4):
+                    score -= 8.0
+
         # Track best
         if score > best_score + 0.5:
             best_score = score
@@ -1216,7 +1559,8 @@ def _plan_phrase_blueprint(chords: List[ChordEvent], phrase_start: float,
                            low: int, high: int, tension: float,
                            tier: int,
                            intention: Optional[PhraseIntention] = None,
-                           last_contour: str = "") -> _PhraseBlueprint:
+                           last_contour: str = "",
+                           harmonic_rhythm_speed: float = 0.0) -> _PhraseBlueprint:
     """Pre-plan a phrase: pick a goal pitch, contour shape, and interval mode.
 
     The goal pitch is a guide tone (3rd/7th) of the chord active at the last
@@ -1259,8 +1603,10 @@ def _plan_phrase_blueprint(chords: List[ChordEvent], phrase_start: float,
     else:
         contour = random.choice(["arch", "ascending", "descending"])
 
-    # --- Interval mode: from tier + tension ---
-    if tier >= 2 and tension > 0.7:
+    # --- Interval mode: from tier + tension + harmonic rhythm ---
+    if harmonic_rhythm_speed > 0.3:
+        interval_mode = "thirds"        # arpeggiation on fast changes
+    elif tier >= 2 and tension > 0.7:
         interval_mode = "wide"
     elif tension < 0.4:
         interval_mode = "stepwise"
@@ -1465,13 +1811,20 @@ def _choose_phrase_length(tier: int, tension: float,
         elif intention.character == PC_WHISPER:
             base = min(base, 3.0)
 
-    # Harmonic rhythm: shorter phrases when chords move fast
+    # Harmonic rhythm: longer phrases when chords move fast (continuous playing)
     if harmonic_rhythm_fast:
-        base *= 0.75
+        base *= 1.5
+
+    # Climax phrases can exceed normal tier max (Tatum marathon phrasing)
+    climax_stretch = 0.0
+    if intention is not None and intention.character == PC_EXCLAMATION:
+        progress = state.phrase_count / max(1, 20)
+        if progress > 0.6:  # late in solo = climax territory
+            climax_stretch = 4.0 * (progress - 0.6) / 0.4  # up to +4 beats
 
     # Clamp to tier maximums
-    tier_max = {1: 10.0, 2: 8.0, 3: 6.0}
-    return max(1.5, min(base, tier_max.get(tier, 8.0)))
+    tier_max = {1: 16.0, 2: 10.0, 3: 6.0}
+    return max(1.5, min(base, tier_max.get(tier, 8.0) + climax_stretch))
 
 
 def _choose_context_rhythmic_cell(tension: float,
@@ -1607,10 +1960,12 @@ def _choose_direction(state: '_SoloState',
 
 
 def _should_insert_strategic_silence(state: '_SoloState', tension: float,
-                                     intention: Optional[PhraseIntention] = None) -> bool:
+                                     intention: Optional[PhraseIntention] = None,
+                                     harmonic_rhythm_fast: bool = False) -> bool:
     """Decide whether to insert strategic silence before the next phrase.
 
-    Considers: intention character, silence starvation, tension level.
+    Considers: intention character, silence starvation, tension level,
+    harmonic rhythm speed.
     """
     # PC_SILENCE intention: always insert
     if intention is not None and intention.character == PC_SILENCE:
@@ -1628,6 +1983,9 @@ def _should_insert_strategic_silence(state: '_SoloState', tension: float,
     # Tension suppression: high tension reduces silence probability
     tension_mod = -0.30 * tension
 
+    # Fast harmonic rhythm suppression: keep playing through changes
+    harmony_mod = -0.40 if harmonic_rhythm_fast else 0.0
+
     # Base probability from intention
     if intention is not None:
         char_probs = {
@@ -1639,13 +1997,22 @@ def _should_insert_strategic_silence(state: '_SoloState', tension: float,
     else:
         base = 0.08
 
-    prob = max(0.0, min(0.8, base + starvation_prob + tension_mod))
+    # Density contrast: high probability after sustained dense playing
+    if (state.beats_since_last_silence > 20.0
+            and state.phrase_count > 8
+            and tension > 0.5):
+        density_prob = 0.30
+    else:
+        density_prob = 0.0
+
+    prob = max(0.0, min(0.8, base + starvation_prob + tension_mod + harmony_mod + density_prob))
     return random.random() < prob
 
 
 def _post_phrase_rest(state: '_SoloState', tension: float, tier: int,
                       intention: Optional[PhraseIntention] = None,
-                      params: Optional[dict] = None) -> float:
+                      params: Optional[dict] = None,
+                      harmonic_rhythm_fast: bool = False) -> float:
     """Determine rest duration after a phrase.
 
     Uses intention.silence_after as base when available, with anti-repetition.
@@ -1664,6 +2031,10 @@ def _post_phrase_rest(state: '_SoloState', tension: float, tier: int,
     if (len(state.phrase_length_history) >= 2 and
             abs(state.last_silence_duration - base_rest) < 0.3):
         base_rest += 0.5 if (state.phrase_count % 2 == 0) else -0.25
+
+    # Fast harmonic rhythm: very short breaths to maintain continuity
+    if harmonic_rhythm_fast:
+        base_rest *= 0.3
 
     rest = max(0.25, base_rest)
     state.last_silence_duration = rest
@@ -1948,7 +2319,12 @@ def _shape_phrase_velocity(base_velocity: int, phrase_progress: float,
         else:
             vel_mod = int(8 * (1.0 - phrase_progress) / 0.4)
     else:
-        vel_mod = 0
+        # Accent-start (Tatum default): strong attack, settling through phrase
+        # +12 at start → 0 at 25% → -5 at end
+        if phrase_progress < 0.25:
+            vel_mod = int(12 * (1.0 - phrase_progress / 0.25))
+        else:
+            vel_mod = int(-5 * (phrase_progress - 0.25) / 0.75)
 
     return max(1, min(127, base_velocity + vel_mod + offset))
 
@@ -1992,22 +2368,26 @@ def _choose_rhythmic_cell(tension: float) -> Tuple[float, ...]:
 
 
 def _choose_velocity(params: MusicParams, beat_in_bar: float = 0.0,
-                     intention: Optional[PhraseIntention] = None) -> int:
+                     intention: Optional[PhraseIntention] = None,
+                     beats_per_bar: int = 4) -> int:
     """Beat-position velocity with accent pattern + tiny humanization jitter.
 
-    Beat 1: +8, Beat 3: +4, Beats 2/4: -2, Offbeats: -6.
+    Downbeat: +8, mid-bar accent: +4, secondary beats: -2, offbeats: -6.
     """
     base = params.velocity_base
 
-    # Beat-position accent pattern
-    beat_frac = beat_in_bar % 4.0
-    if beat_frac < 0.1:            # Beat 1
+    # Beat-position accent pattern (generalized for any meter)
+    beat_frac = beat_in_bar % float(beats_per_bar)
+    mid_bar = beats_per_bar // 2
+    if beat_frac < 0.1:                        # Downbeat (beat 1)
         base += 8
-    elif abs(beat_frac - 2.0) < 0.1:  # Beat 3
+    elif abs(beat_frac - float(mid_bar)) < 0.5:  # Mid-bar accent
         base += 4
-    elif abs(beat_frac - 1.0) < 0.1 or abs(beat_frac - 3.0) < 0.1:  # Beats 2, 4
+    elif beat_frac > beats_per_bar - 0.5:      # Last beat (pickup)
         base -= 2
-    else:                          # Offbeats
+    elif abs(beat_frac - round(beat_frac)) < 0.15:  # On-beat
+        base -= 2
+    else:                                      # Offbeats
         base -= 6
 
     # Narrative velocity offset
@@ -2146,6 +2526,287 @@ def _chromatic_run(current_midi: int, low: int, high: int,
     return result
 
 
+# ---------------------------------------------------------------------------
+# Run Builder (v13) -- backward-planned, forward-executed Tatum runs
+# ---------------------------------------------------------------------------
+
+
+def _build_run_notes(blueprint: RunBlueprint,
+                     chords: List[ChordEvent],
+                     state: '_SoloState',
+                     params: 'MusicParams',
+                     swing: bool) -> Tuple[List[NoteEvent], float]:
+    """Build a pre-planned run from a RunBlueprint into NoteEvents.
+
+    Core algorithm: backward planning (pitch sequence from target), forward execution.
+    Returns (notes, new_beat_position).
+    """
+    low = params.register_low
+    high = params.register_high
+
+    # Climax runs: temporarily widen register for Tatum-style keyboard sweeps
+    if blueprint.purpose == "climax" and blueprint.intensity > 0.7:
+        low = max(36, low - 12)    # extend down one octave (to C2)
+        high = min(96, high + 5)   # extend up slightly (to C7)
+
+    source_pitch = state.pitch
+    target_pitch = max(low, min(high, blueprint.target_pitch))
+    available_beats = blueprint.end_beat - blueprint.start_beat
+    if available_beats < 0.5:
+        blueprint.executed = True
+        return [], blueprint.end_beat
+
+    # --- Note count based on available time and run speed ---
+    is_fill = blueprint.purpose == "fill"
+    if is_fill:
+        avg_dur = 0.30  # 8th-note-ish fills
+    else:
+        avg_dur = 0.22  # 16th-note-ish runs
+    max_notes = 36 if blueprint.purpose == "climax" else 24
+    note_count = max(6, min(max_notes, int(available_beats / avg_dur)))
+
+    # --- Build pitch sequence backward from target ---
+    pitches = _build_run_pitch_sequence(
+        blueprint, note_count, source_pitch, target_pitch,
+        low, high, chords)
+
+    # --- Durations with timing profile ---
+    if is_fill:
+        durations = _run_durations(len(pitches), blueprint.timing_profile,
+                                   0.25, 0.50, 0.30)
+    else:
+        durations = _run_durations(len(pitches), blueprint.timing_profile,
+                                   0.15, 0.35, 0.22)
+
+    # --- Velocity arc: crescendo through body, decrescendo last 2-3 notes ---
+    vel_base = params.velocity_base + 5
+    vel_range = params.velocity_range
+    velocities = []
+    n = len(pitches)
+    landing_zone = max(2, n // 8)  # last ~12% for decrescendo
+    for i in range(n):
+        if i < n - landing_zone:
+            # Crescendo through body
+            body_progress = i / max(1, n - landing_zone - 1)
+            vel = vel_base + int(body_progress * vel_range * 0.6)
+        else:
+            # Decrescendo for graceful landing
+            landing_progress = (i - (n - landing_zone)) / max(1, landing_zone - 1)
+            vel = vel_base + int(vel_range * 0.6) - int(landing_progress * vel_range * 0.3)
+        velocities.append(max(30, min(120, vel)))
+
+    # --- Emit NoteEvents ---
+    notes: List[NoteEvent] = []
+    beat = blueprint.start_beat
+    for i, (pitch, dur, vel) in enumerate(zip(pitches, durations, velocities)):
+        if beat >= blueprint.end_beat:
+            break
+        tick = _beat_to_tick(beat)
+        if swing:
+            tick = _apply_swing(tick)
+        tick = _humanize(tick, amount=5, beat=beat)
+        dur_ticks = max(1, int(dur * TICKS_PER_QUARTER * 0.85))  # slight staccato
+        notes.append(NoteEvent(
+            pitch=max(low, min(high, pitch)),
+            start_tick=max(0, tick),
+            duration_ticks=dur_ticks,
+            velocity=vel,
+            channel=0,
+        ))
+
+        # Two-handed dyads: every other note when enabled
+        if blueprint.two_handed and i % 2 == 0:
+            ch = _get_chord_at_beat(chords, beat)
+            if ch:
+                dyad = _tatum_dyad_below(pitch, ch.root_pc, ch.quality, low)
+                if dyad is not None:
+                    notes.append(NoteEvent(
+                        pitch=dyad,
+                        start_tick=max(0, tick),
+                        duration_ticks=dur_ticks,
+                        velocity=max(25, vel - 10),
+                        channel=0,
+                    ))
+
+        beat += dur
+
+    # --- Post-run state updates ---
+    if notes:
+        state.pitch = notes[-1].pitch
+        state.record_pitch(state.pitch)
+        # Set run direction for run-exit behavior
+        if len(pitches) >= 2:
+            state.last_run_direction = 1 if pitches[-1] > pitches[-2] else -1
+
+    blueprint.executed = True
+    state.runs_executed += 1
+    state.last_run_end_beat = beat
+    final_beat = max(blueprint.end_beat, beat)
+    return notes, final_beat
+
+
+def _build_run_pitch_sequence(blueprint: RunBlueprint,
+                              note_count: int,
+                              source_pitch: int,
+                              target_pitch: int,
+                              low: int, high: int,
+                              chords: List[ChordEvent]) -> List[int]:
+    """Build pitch sequence for a run, backward from target, then reverse.
+
+    Threads through scale materials, uses extensions every 4-5th note,
+    respects contour shape.
+    """
+    materials = blueprint.scale_materials
+    if not materials:
+        # Fallback: chromatic between source and target
+        direction = 1 if target_pitch > source_pitch else -1
+        return list(range(source_pitch, target_pitch + direction, direction))[:note_count]
+
+    # Build full scale pool per material segment
+    # Each segment: (beat_boundary, root_pc, quality, scale_tones_asc)
+    segments = []
+    for i, (beat_b, root_pc, quality) in enumerate(materials):
+        next_beat = materials[i + 1][0] if i + 1 < len(materials) else blueprint.end_beat
+        tones = _scale_tones_in_range(root_pc, quality, low, high)
+        if not tones:
+            tones = list(range(low, high + 1))
+        # Add tension tones (9ths, 11ths, 13ths)
+        tension_intervals = TENSIONS.get(quality, ())
+        tension_tones = set()
+        for midi_note in range(low, high + 1):
+            interval = (midi_note % 12 - root_pc) % 12
+            if interval in tension_intervals:
+                tension_tones.add(midi_note)
+        segments.append({
+            "beat_start": beat_b,
+            "beat_end": next_beat,
+            "root_pc": root_pc,
+            "quality": quality,
+            "scale": sorted(set(tones)),
+            "tensions": sorted(tension_tones),
+        })
+
+    # Distribute notes across segments proportionally by beat duration
+    total_dur = blueprint.end_beat - blueprint.start_beat
+    notes_per_seg = []
+    remaining_notes = note_count
+    for i, seg in enumerate(segments):
+        seg_dur = seg["beat_end"] - seg["beat_start"]
+        if i == len(segments) - 1:
+            notes_per_seg.append(remaining_notes)
+        else:
+            n = max(1, int(note_count * seg_dur / max(0.01, total_dur)))
+            n = min(n, remaining_notes - (len(segments) - i - 1))
+            notes_per_seg.append(max(1, n))
+            remaining_notes -= notes_per_seg[-1]
+
+    # Build backward from target, then reverse
+    backward_pitches = [target_pitch]
+    current = target_pitch
+
+    # Determine contour direction for backward traversal
+    if blueprint.contour in ("sweep_up", "cascade"):
+        backward_dir = -1  # going backward from top means descending = going down
+    elif blueprint.contour == "sweep_down":
+        backward_dir = 1   # going backward from bottom means ascending
+    elif blueprint.contour == "arc_up_down":
+        backward_dir = 1   # second half descending, backward = ascending
+    elif blueprint.contour == "arc_down_up":
+        backward_dir = -1  # second half ascending, backward = descending
+    else:
+        backward_dir = -1 if target_pitch > source_pitch else 1
+
+    # Walk backward through segments (reversed)
+    extension_counter = 0
+    for seg_idx in range(len(segments) - 1, -1, -1):
+        seg = segments[seg_idx]
+        seg_notes = notes_per_seg[seg_idx]
+        scale = seg["scale"]
+        tensions = seg["tensions"]
+
+        if not scale:
+            continue
+
+        for _ in range(seg_notes - (1 if seg_idx == len(segments) - 1 else 0)):
+            if len(backward_pitches) >= note_count:
+                break
+
+            extension_counter += 1
+            # Extension threading: every 4-5th note, use tension tone
+            use_extension = (extension_counter % 5 == 0
+                             and tensions
+                             and blueprint.intensity > 0.3)
+
+            if use_extension:
+                # Find nearest tension tone in the right direction
+                candidates = [t for t in tensions
+                              if (backward_dir < 0 and t < current)
+                              or (backward_dir > 0 and t > current)]
+                if candidates:
+                    next_p = min(candidates, key=lambda t: abs(t - current))
+                else:
+                    next_p = min(tensions, key=lambda t: abs(t - current))
+            else:
+                # Step through scale
+                candidates = [t for t in scale
+                              if (backward_dir < 0 and t < current)
+                              or (backward_dir > 0 and t > current)]
+                if candidates:
+                    # Pick the nearest step
+                    next_p = min(candidates, key=lambda t: abs(t - current))
+                else:
+                    # Ran out of scale in this direction — wrap/reverse
+                    next_p = min(scale, key=lambda t: abs(t - current))
+                    if next_p == current and len(scale) > 1:
+                        backward_dir = -backward_dir
+                        candidates = [t for t in scale
+                                      if (backward_dir < 0 and t < current)
+                                      or (backward_dir > 0 and t > current)]
+                        if candidates:
+                            next_p = min(candidates, key=lambda t: abs(t - current))
+
+            # Transition zone: at segment boundaries, allow chromatic passing
+            if seg_idx > 0 and len(backward_pitches) >= note_count - 3:
+                # Within last 3 notes approaching segment boundary: chromatic step OK
+                step = -1 if backward_dir < 0 else 1
+                chromatic_candidate = current + step
+                if low <= chromatic_candidate <= high:
+                    next_p = chromatic_candidate
+
+            current = max(low, min(high, next_p))
+            backward_pitches.append(current)
+
+    # Reverse to get forward sequence
+    pitches = list(reversed(backward_pitches))
+
+    # Apply contour shaping (arc / cascade adjustments)
+    if blueprint.contour == "arc_up_down" and len(pitches) > 4:
+        # Peak at 55-65% of run
+        peak_idx = int(len(pitches) * 0.6)
+        peak_pitch = max(pitches[:peak_idx + 1]) if peak_idx > 0 else pitches[0]
+        # Ensure the peak is actually the highest point
+        for i in range(peak_idx + 1, len(pitches)):
+            if pitches[i] > peak_pitch:
+                pitches[i] = max(low, pitches[i] - (pitches[i] - peak_pitch))
+    elif blueprint.contour == "cascade" and len(pitches) > 4:
+        # Sweep up to 75%, rapid descent 25%
+        turn_idx = int(len(pitches) * 0.75)
+        # After turn, force descending
+        for i in range(turn_idx + 1, len(pitches)):
+            if i > 0 and pitches[i] >= pitches[i - 1]:
+                pitches[i] = max(low, pitches[i - 1] - 1)
+
+    # Ensure we start near source pitch: adjust first few pitches
+    if pitches and abs(pitches[0] - source_pitch) > 12:
+        # Smooth entry: interpolate first 3 notes toward source
+        blend_count = min(3, len(pitches))
+        for i in range(blend_count):
+            alpha = i / max(1, blend_count)
+            pitches[i] = int(source_pitch + alpha * (pitches[i] - source_pitch))
+
+    return pitches[:note_count]
+
+
 def _select_tier(tension: float, phrase_count: int = 0) -> int:
     """Select generation tier with deterministic cycling near boundaries.
 
@@ -2191,7 +2852,8 @@ def _generate_tier1_phrase(current_beat: float, phrase_beats: float,
     blueprint = _plan_phrase_blueprint(
         chords, current_beat, phrase_end, state.pitch,
         low, high, tension, tier=1, intention=intention,
-        last_contour=getattr(state, '_last_contour', ""))
+        last_contour=getattr(state, '_last_contour', ""),
+        harmonic_rhythm_speed=state.harmonic_rhythm_speed)
     state._last_contour = blueprint.contour
 
     while beat < phrase_end - 1e-9:
@@ -2236,7 +2898,7 @@ def _generate_tier1_phrase(current_beat: float, phrase_beats: float,
                         tick = _apply_swing(tick)
                     tick = _humanize(tick, beat=beat)
                     dur_ticks = max(30, int(dur * TICKS_PER_QUARTER))
-                    vel = _choose_velocity(params, beat_in_bar=beat % 4.0, intention=intention)
+                    vel = _choose_velocity(params, beat_in_bar=beat % float(state.beats_per_bar), intention=intention)
                     vel = _shape_phrase_velocity(vel, phrase_progress, intention)
                     notes.append(NoteEvent(
                         pitch=cp, start_tick=tick,
@@ -2263,7 +2925,7 @@ def _generate_tier1_phrase(current_beat: float, phrase_beats: float,
             else:
                 target = _choose_target_pitch(
                     state.pitch, chord.root_pc, chord.quality,
-                    low, high, tension, beat % 4.0,
+                    low, high, tension, beat % float(state.beats_per_bar),
                     substitute_tones=getattr(state, 'substitute_tones', None),
                     target_queue=state.target_queue, current_beat=beat,
                     blueprint=blueprint, phrase_progress=phrase_progress,
@@ -2287,7 +2949,7 @@ def _generate_tier1_phrase(current_beat: float, phrase_beats: float,
                 tick = _apply_swing(tick)
             tick = _humanize(tick, beat=beat)
             dur_ticks = max(30, int(dur * TICKS_PER_QUARTER))
-            vel = _choose_velocity(params, beat_in_bar=beat % 4.0, intention=intention)
+            vel = _choose_velocity(params, beat_in_bar=beat % float(state.beats_per_bar), intention=intention)
 
             # Phrase-internal velocity shaping
             vel = _shape_phrase_velocity(vel, phrase_progress, intention)
@@ -2366,7 +3028,7 @@ def _generate_tier2_phrase(current_beat: float, phrase_beats: float,
                     tick = _apply_swing(tick)
                 tick = _humanize(tick, beat=beat)
                 dur_ticks = max(30, int(dur * TICKS_PER_QUARTER))
-                vel = _choose_velocity(params, beat_in_bar=beat % 4.0, intention=intention)
+                vel = _choose_velocity(params, beat_in_bar=beat % float(state.beats_per_bar), intention=intention)
                 notes.append(NoteEvent(
                     pitch=note_midi, start_tick=tick,
                     duration_ticks=dur_ticks, velocity=vel,
@@ -2388,7 +3050,8 @@ def _generate_tier2_phrase(current_beat: float, phrase_beats: float,
     blueprint = _plan_phrase_blueprint(
         chords, current_beat, phrase_end, state.pitch,
         low, high, tension, tier=2, intention=intention,
-        last_contour=getattr(state, '_last_contour', ""))
+        last_contour=getattr(state, '_last_contour', ""),
+        harmonic_rhythm_speed=state.harmonic_rhythm_speed)
     state._last_contour = blueprint.contour
 
     # Lock strategy for the entire phrase (Improvement 4)
@@ -2418,7 +3081,7 @@ def _generate_tier2_phrase(current_beat: float, phrase_beats: float,
                     tick = _apply_swing(tick)
                 tick = _humanize(tick, beat=beat)
                 dur_ticks = max(30, int(dur * TICKS_PER_QUARTER))
-                vel = _choose_velocity(params, beat_in_bar=beat % 4.0, intention=intention)
+                vel = _choose_velocity(params, beat_in_bar=beat % float(state.beats_per_bar), intention=intention)
                 notes.append(NoteEvent(
                     pitch=run_exit, start_tick=tick,
                     duration_ticks=dur_ticks, velocity=vel,
@@ -2442,7 +3105,7 @@ def _generate_tier2_phrase(current_beat: float, phrase_beats: float,
                     notes.append(NoteEvent(
                         pitch=approach, start_tick=tick,
                         duration_ticks=max(30, int(cdur * TICKS_PER_QUARTER)),
-                        velocity=max(1, _choose_velocity(params, beat_in_bar=beat % 4.0, intention=intention) - 10),
+                        velocity=max(1, _choose_velocity(params, beat_in_bar=beat % float(state.beats_per_bar), intention=intention) - 10),
                     ))
                     state.pitch = approach
                     state.record_pitch(approach)
@@ -2457,7 +3120,7 @@ def _generate_tier2_phrase(current_beat: float, phrase_beats: float,
             else:
                 target = _choose_target_pitch(
                     state.pitch, chord.root_pc, chord.quality,
-                    low, high, tension, beat % 4.0,
+                    low, high, tension, beat % float(state.beats_per_bar),
                     substitute_tones=getattr(state, 'substitute_tones', None),
                     target_queue=state.target_queue, current_beat=beat,
                     blueprint=blueprint, phrase_progress=phrase_progress,
@@ -2472,7 +3135,7 @@ def _generate_tier2_phrase(current_beat: float, phrase_beats: float,
                     tick = _apply_swing(tick)
                 tick = _humanize(tick, beat=beat)
                 dur_ticks = max(30, int(dur * TICKS_PER_QUARTER))
-                vel = _choose_velocity(params, beat_in_bar=beat % 4.0, intention=intention)
+                vel = _choose_velocity(params, beat_in_bar=beat % float(state.beats_per_bar), intention=intention)
                 notes.append(NoteEvent(
                     pitch=note_midi, start_tick=tick,
                     duration_ticks=dur_ticks, velocity=vel,
@@ -2496,7 +3159,7 @@ def _generate_tier2_phrase(current_beat: float, phrase_beats: float,
                     tick = _apply_swing(tick)
                 tick = _humanize(tick, beat=beat)
                 dur_ticks = max(30, int(dur * TICKS_PER_QUARTER))
-                vel = _choose_velocity(params, beat_in_bar=beat % 4.0, intention=intention)
+                vel = _choose_velocity(params, beat_in_bar=beat % float(state.beats_per_bar), intention=intention)
                 notes.append(NoteEvent(
                     pitch=note_midi, start_tick=tick,
                     duration_ticks=dur_ticks, velocity=vel,
@@ -2520,7 +3183,7 @@ def _generate_tier2_phrase(current_beat: float, phrase_beats: float,
                     tick = _apply_swing(tick)
                 tick = _humanize(tick, beat=beat)
                 dur_ticks = max(30, int(dur * TICKS_PER_QUARTER))
-                vel = _choose_velocity(params, beat_in_bar=beat % 4.0, intention=intention)
+                vel = _choose_velocity(params, beat_in_bar=beat % float(state.beats_per_bar), intention=intention)
                 notes.append(NoteEvent(
                     pitch=note_midi, start_tick=tick,
                     duration_ticks=dur_ticks, velocity=vel,
@@ -2542,7 +3205,7 @@ def _generate_tier2_phrase(current_beat: float, phrase_beats: float,
                     tick = _apply_swing(tick)
                 tick = _humanize(tick, beat=beat)
                 dur_ticks = max(30, int(dur * TICKS_PER_QUARTER))
-                vel = _choose_velocity(params, beat_in_bar=beat % 4.0, intention=intention)
+                vel = _choose_velocity(params, beat_in_bar=beat % float(state.beats_per_bar), intention=intention)
                 notes.append(NoteEvent(
                     pitch=note_midi, start_tick=tick,
                     duration_ticks=dur_ticks, velocity=vel,
@@ -2554,7 +3217,7 @@ def _generate_tier2_phrase(current_beat: float, phrase_beats: float,
         elif strategy == "direct":
             target = _choose_target_pitch(
                 state.pitch, chord.root_pc, chord.quality,
-                low, high, tension, beat % 4.0,
+                low, high, tension, beat % float(state.beats_per_bar),
                 substitute_tones=getattr(state, 'substitute_tones', None),
                 target_queue=state.target_queue, current_beat=beat,
                 blueprint=blueprint, phrase_progress=phrase_progress,
@@ -2571,7 +3234,7 @@ def _generate_tier2_phrase(current_beat: float, phrase_beats: float,
                 tick = _apply_swing(tick)
             tick = _humanize(tick, beat=beat)
             dur_ticks = max(30, int(dur * TICKS_PER_QUARTER))
-            vel = _choose_velocity(params, beat_in_bar=beat % 4.0, intention=intention)
+            vel = _choose_velocity(params, beat_in_bar=beat % float(state.beats_per_bar), intention=intention)
             notes.append(NoteEvent(
                 pitch=target, start_tick=tick,
                 duration_ticks=dur_ticks, velocity=vel,
@@ -2627,7 +3290,8 @@ def _generate_tier3_phrase(current_beat: float, phrase_beats: float,
     blueprint = _plan_phrase_blueprint(
         chords, current_beat, phrase_end, state.pitch,
         low, high, tension, tier=3, intention=intention,
-        last_contour=getattr(state, '_last_contour', ""))
+        last_contour=getattr(state, '_last_contour', ""),
+        harmonic_rhythm_speed=state.harmonic_rhythm_speed)
     state._last_contour = blueprint.contour
 
     vel_base = max(90, params.velocity_base)
@@ -2660,7 +3324,7 @@ def _generate_tier3_phrase(current_beat: float, phrase_beats: float,
                     tick = _apply_swing(tick)
                 tick = _humanize(tick, amount=5, beat=beat)
                 dur_ticks = max(30, int(dur * TICKS_PER_QUARTER))
-                vel = _choose_velocity(params, beat_in_bar=beat % 4.0, intention=intention)
+                vel = _choose_velocity(params, beat_in_bar=beat % float(state.beats_per_bar), intention=intention)
                 notes.append(NoteEvent(
                     pitch=run_exit, start_tick=tick,
                     duration_ticks=dur_ticks, velocity=vel,
@@ -2689,7 +3353,7 @@ def _generate_tier3_phrase(current_beat: float, phrase_beats: float,
                     tick = _apply_swing(tick)
                 tick = _humanize(tick, amount=5, beat=beat)
                 dur_ticks = max(30, int(dur * TICKS_PER_QUARTER))
-                vel = _choose_velocity(params, beat_in_bar=beat % 4.0, intention=intention)
+                vel = _choose_velocity(params, beat_in_bar=beat % float(state.beats_per_bar), intention=intention)
                 notes.append(NoteEvent(
                     pitch=note_midi, start_tick=tick,
                     duration_ticks=dur_ticks, velocity=vel,
@@ -2726,7 +3390,7 @@ def _generate_tier3_phrase(current_beat: float, phrase_beats: float,
                     tick = _apply_swing(tick)
                 tick = _humanize(tick, amount=5, beat=beat)
                 dur_ticks = max(30, int(dur * TICKS_PER_QUARTER))
-                vel = _choose_velocity(params, beat_in_bar=beat % 4.0, intention=intention)
+                vel = _choose_velocity(params, beat_in_bar=beat % float(state.beats_per_bar), intention=intention)
                 notes.append(NoteEvent(
                     pitch=note_midi, start_tick=tick,
                     duration_ticks=dur_ticks, velocity=vel,
@@ -2761,7 +3425,7 @@ def _generate_tier3_phrase(current_beat: float, phrase_beats: float,
                         tick = _apply_swing(tick)
                     tick = _humanize(tick, amount=5, beat=beat)
                     dur_ticks = max(30, int(dur * TICKS_PER_QUARTER))
-                    vel = _choose_velocity(params, beat_in_bar=beat % 4.0, intention=intention)
+                    vel = _choose_velocity(params, beat_in_bar=beat % float(state.beats_per_bar), intention=intention)
                     notes.append(NoteEvent(
                         pitch=ep_clamped, start_tick=tick,
                         duration_ticks=dur_ticks, velocity=vel,
@@ -2783,7 +3447,7 @@ def _generate_tier3_phrase(current_beat: float, phrase_beats: float,
                     tick = _apply_swing(tick)
                 tick = _humanize(tick, amount=5, beat=beat)
                 dur_ticks = max(30, int(dur * TICKS_PER_QUARTER))
-                vel = _choose_velocity(params, beat_in_bar=beat % 4.0, intention=intention)
+                vel = _choose_velocity(params, beat_in_bar=beat % float(state.beats_per_bar), intention=intention)
                 notes.append(NoteEvent(
                     pitch=note_midi, start_tick=tick,
                     duration_ticks=dur_ticks, velocity=vel,
@@ -2873,7 +3537,7 @@ def _generate_pentatonic_super_phrase(current_beat: float, phrase_beats: float,
             tick = _apply_swing(tick)
         tick = _humanize(tick, beat=beat)
         dur_ticks = max(30, int(dur * TICKS_PER_QUARTER))
-        vel = _choose_velocity(params, beat_in_bar=beat % 4.0, intention=intention)
+        vel = _choose_velocity(params, beat_in_bar=beat % float(state.beats_per_bar), intention=intention)
         notes.append(NoteEvent(
             pitch=note_midi, start_tick=tick,
             duration_ticks=dur_ticks, velocity=vel,
@@ -2913,7 +3577,7 @@ def _generate_call_response_phrase(current_beat: float, phrase_beats: float,
         high = params.register_high
         target = _choose_target_pitch(
             state.pitch, chord.root_pc, chord.quality,
-            low, high, tension, beat % 4.0,
+            low, high, tension, beat % float(state.beats_per_bar),
             substitute_tones=getattr(state, 'substitute_tones', None),
             target_queue=state.target_queue, current_beat=beat,
             state=state)
@@ -2931,7 +3595,7 @@ def _generate_call_response_phrase(current_beat: float, phrase_beats: float,
             tick = _apply_swing(tick)
         tick = _humanize(tick, beat=beat)
         dur_ticks = max(30, int(dur * TICKS_PER_QUARTER))
-        vel = _choose_velocity(params, beat_in_bar=beat % 4.0, intention=intention)
+        vel = _choose_velocity(params, beat_in_bar=beat % float(state.beats_per_bar), intention=intention)
         notes.append(NoteEvent(
             pitch=target, start_tick=tick,
             duration_ticks=dur_ticks, velocity=vel,
@@ -2987,7 +3651,7 @@ def _generate_call_response_phrase(current_beat: float, phrase_beats: float,
             tick = _apply_swing(tick)
         tick = _humanize(tick, beat=beat)
         dur_ticks = max(30, int(dur * TICKS_PER_QUARTER))
-        vel = _choose_velocity(params, beat_in_bar=beat % 4.0, intention=intention)
+        vel = _choose_velocity(params, beat_in_bar=beat % float(state.beats_per_bar), intention=intention)
         notes.append(NoteEvent(
             pitch=resp_pitch, start_tick=tick,
             duration_ticks=dur_ticks, velocity=vel,
@@ -3046,7 +3710,7 @@ def _generate_triplet_phrase(current_beat: float, phrase_beats: float,
             if swing:
                 tick = _apply_swing(tick)
             tick = _humanize(tick, beat=beat)
-            vel = _choose_velocity(params, beat_in_bar=beat % 4.0, intention=intention)
+            vel = _choose_velocity(params, beat_in_bar=beat % float(state.beats_per_bar), intention=intention)
             notes.append(NoteEvent(
                 pitch=note_midi, start_tick=tick,
                 duration_ticks=triplet_dur_ticks, velocity=vel,
@@ -3199,7 +3863,7 @@ def _extract_section_spans(
 
 def _generate_section_melody(
     chords: List[ChordEvent], sec_start: float, sec_end: float,
-    start_pitch: int, swing: bool,
+    start_pitch: int, swing: bool, beats_per_bar: int = 4,
 ) -> Tuple[List[NoteEvent], int]:
     """Generate head melody for a single form section using phrase templates.
 
@@ -3233,8 +3897,8 @@ def _generate_section_melody(
     contour = template["contour"]
     num_notes = len(rhythm)
 
-    # Split section into 2-bar (8-beat) chunks
-    chunk_size = 8.0
+    # Split section into 2-bar chunks
+    chunk_size = 2.0 * beats_per_bar
     num_chunks = max(1, int(section_beats / chunk_size))
     mid_register = (MELODY_LOW_BASE + MELODY_HIGH_BASE) // 2
 
@@ -3343,7 +4007,8 @@ def _vary_melody(
 
 
 def generate_head_melody(chords: List[ChordEvent], total_beats: float,
-                         swing: bool = True) -> List[NoteEvent]:
+                         swing: bool = True,
+                         beats_per_bar: int = 4) -> List[NoteEvent]:
     """Generate a composed head melody with form-aware A-section recall."""
     if not chords:
         return []
@@ -3357,7 +4022,8 @@ def generate_head_melody(chords: List[ChordEvent], total_beats: float,
 
     # No section info — flat generation (backward compat)
     if not section_spans:
-        notes, _ = _generate_section_melody(chords, 0.0, total_beats, pitch, swing)
+        notes, _ = _generate_section_melody(chords, 0.0, total_beats, pitch, swing,
+                                               beats_per_bar=beats_per_bar)
         notes.sort(key=lambda n: n.start_tick)
         notes = _add_grace_notes(notes, probability=0.12)
         return notes
@@ -3380,7 +4046,8 @@ def generate_head_melody(chords: List[ChordEvent], total_beats: float,
         else:
             # Compose: generate new melody for this section
             sec_notes, pitch = _generate_section_melody(
-                sec_chords, sec_start, sec_end, pitch, swing)
+                sec_chords, sec_start, sec_end, pitch, swing,
+                beats_per_bar=beats_per_bar)
             section_melodies[label] = (sec_notes, sec_start)
             notes.extend(sec_notes)
 
@@ -3393,7 +4060,8 @@ def generate_solo(chords: List[ChordEvent], total_beats: float,
                   tension_curve: str = "arc", swing: bool = True,
                   coltrane: bool = False, seed: Optional[int] = None,
                   intensity: float = 1.0,
-                  bar_feel: Optional[list] = None) -> List[NoteEvent]:
+                  bar_feel: Optional[list] = None,
+                  beats_per_bar: int = 4) -> List[NoteEvent]:
     """Generate an improvised jazz solo with tension-driven phrasing.
 
     *intensity* (0–1) scales the tension curve output so that lower-
@@ -3412,6 +4080,7 @@ def generate_solo(chords: List[ChordEvent], total_beats: float,
     state = _SoloState(
         pitch=_nearest_chord_tone(mid_pitch, chords[0].root_pc, chords[0].quality,
                                   MELODY_LOW_BASE, MELODY_HIGH_BASE),
+        beats_per_bar=beats_per_bar,
     )
     state.record_pitch(state.pitch)
 
@@ -3419,10 +4088,14 @@ def generate_solo(chords: List[ChordEvent], total_beats: float,
     narrative = _plan_solo_narrative(chords, total_beats, curve, intensity, coltrane)
     state.narrative = narrative
 
+    # Pre-plan Tatum-style run blueprints
+    run_plan = _plan_run_opportunities(chords, narrative, total_beats, intensity, curve)
+    state.run_plan = run_plan
+
     beat = 0.0
     while beat < total_beats:
         global _current_feel
-        bar_idx = int(beat) // 4
+        bar_idx = int(beat) // beats_per_bar
         _current_feel = bar_feel[bar_idx] if bar_feel and bar_idx < len(bar_feel) else None
 
         progress = beat / total_beats if total_beats > 0 else 0.0
@@ -3473,13 +4146,18 @@ def generate_solo(chords: List[ChordEvent], total_beats: float,
         # Phrase length -- context-aware with narrative intention
         beats_until_change = _beats_until_chord_change(chords, beat)
         harmonic_rhythm_fast = beats_until_change <= 2.0
+        state.harmonic_rhythm_speed = max(0.0, min(1.0, (3.0 - beats_until_change) / 2.0))
 
         phrase_beats = _choose_phrase_length(
             tier, tension, harmonic_rhythm_fast, state, intention)
 
         # Strategic silence: context-aware (replaces fixed 16% chance)
-        if _should_insert_strategic_silence(state, tension, intention):
-            silence_dur = 4.0 + (1.0 - tension) * 4.0  # longer at low tension
+        if _should_insert_strategic_silence(state, tension, intention,
+                                            harmonic_rhythm_fast=harmonic_rhythm_fast):
+            # Silence duration scales with tension and preceding density
+            density_factor = max(0.5, min(2.0, state.beats_since_last_silence / 16.0))
+            silence_dur = (4.0 + (1.0 - tension) * 4.0) * density_factor
+            silence_dur = min(silence_dur, 12.0)  # cap at 12 beats (3 bars)
             beat += silence_dur
             state.beats_since_last_silence = 0.0
             state.last_silence_duration = silence_dur
@@ -3521,6 +4199,37 @@ def generate_solo(chords: List[ChordEvent], total_beats: float,
                 state.phrase_count += 1
                 state.callback_count += 1
                 beat += 1.0  # fixed breath after callback
+                continue
+
+        # Run blueprint interception (v13): execute pre-planned Tatum runs
+        active_run = state.run_plan.get_active_run(beat) if state.run_plan else None
+        if active_run is not None:
+            if intention and intention.character in (PC_WHISPER, PC_SILENCE):
+                active_run.executed = True  # narrative override — suppress run
+            else:
+                run_notes, beat = _build_run_notes(
+                    active_run, chords, state, params, swing)
+                if run_notes:
+                    notes.extend(run_notes)
+                    _cur_chord = _get_chord_at_beat(chords, beat)
+                    _cur_root_pc = _cur_chord.root_pc if _cur_chord else 0
+                    state.record_phrase(run_notes, beat, tension, tier, _cur_root_pc)
+                    _record_phrase_ending(state, run_notes, chords, beat)
+                    state.record_phrase_length(active_run.end_beat - active_run.start_beat)
+                    state.beats_since_last_silence += (active_run.end_beat - active_run.start_beat)
+                    state.phrase_count += 1
+                    beat += 0.5 + (1.0 - tension) * 0.5  # breath after run
+                    beat = max(beat, active_run.end_beat)  # forward progress
+                    continue
+
+        # Upcoming run awareness: truncate phrase to leave room for approaching run
+        upcoming_run = state.run_plan.get_upcoming_run(beat) if state.run_plan else None
+        if upcoming_run:
+            max_beats = upcoming_run.start_beat - beat - 0.5
+            if max_beats > 0.5:
+                phrase_beats = min(phrase_beats, max_beats)
+            else:
+                beat = upcoming_run.start_beat
                 continue
 
         # Q-A opening: adjust starting pitch based on how last phrase ended
@@ -3597,7 +4306,8 @@ def generate_solo(chords: List[ChordEvent], total_beats: float,
                 ghost_beat += 0.25
 
         # Context-aware post-phrase rest (replaces mandatory breath + strategic rests)
-        rest_dur = _post_phrase_rest(state, tension, tier, intention)
+        rest_dur = _post_phrase_rest(state, tension, tier, intention,
+                                     harmonic_rhythm_fast=harmonic_rhythm_fast)
 
         # Always breathe on key center changes, proportional to key distance
         current_chord = _get_chord_at_beat(chords, beat)
@@ -3620,15 +4330,16 @@ def generate_solo(chords: List[ChordEvent], total_beats: float,
 
 
 def generate_trading_fours(chords: List[ChordEvent], total_beats: float,
-                           intensity: float = 0.6) -> List[NoteEvent]:
+                           intensity: float = 0.6,
+                           beats_per_bar: int = 4) -> List[NoteEvent]:
     """Generate a trading-fours section (4 bars melody, 4 bars drums)."""
     if not chords:
         return []
 
     notes: List[NoteEvent] = []
     beat = 0.0
-    phrase_size = 32.0
-    melody_beats = 16.0
+    phrase_size = 8.0 * beats_per_bar   # 4 bars melody + 4 bars drums
+    melody_beats = 4.0 * beats_per_bar  # 4 bars of melody
 
     mid_pitch = (MELODY_LOW_BASE + MELODY_HIGH_BASE) // 2
     pitch = _nearest_chord_tone(mid_pitch, chords[0].root_pc, chords[0].quality,
@@ -3655,7 +4366,7 @@ def generate_trading_fours(chords: List[ChordEvent], total_beats: float,
             # Use _choose_target_pitch for variety
             target = _choose_target_pitch(
                 pitch, chord.root_pc, chord.quality,
-                low, high, tension=intensity, beat_in_bar=current_beat % 4.0)
+                low, high, tension=intensity, beat_in_bar=current_beat % float(beats_per_bar))
 
             # Use rhythmic cells
             cell = _choose_rhythmic_cell(tension=intensity)
@@ -3683,7 +4394,7 @@ def generate_trading_fours(chords: List[ChordEvent], total_beats: float,
             tick = _apply_swing(tick)
             tick = _humanize(tick, beat=current_beat)
             dur_ticks = max(30, int(dur * TICKS_PER_QUARTER))
-            vel = _choose_velocity(params, beat_in_bar=current_beat % 4.0)
+            vel = _choose_velocity(params, beat_in_bar=current_beat % float(beats_per_bar))
 
             notes.append(NoteEvent(
                 pitch=target, start_tick=tick,
@@ -3737,6 +4448,7 @@ def generate_melody_expression(
     notes: List[NoteEvent],
     chords: list,
     channel: int = MELODY_CHANNEL,
+    beats_per_bar: int = 4,
 ) -> tuple:
     """Generate pitch bends and CC curves for expressive melody.
 
@@ -3757,12 +4469,13 @@ def generate_melody_expression(
     # --- CC11 phrase dynamics ---
     # Group notes into phrases (gap > 1 bar = new phrase)
     phrases: List[List[NoteEvent]] = []
+    tpb = ticks_per_bar(beats_per_bar)
     current_phrase: List[NoteEvent] = []
     for note in notes:
         if current_phrase:
             prev = current_phrase[-1]
             gap = note.start_tick - (prev.start_tick + prev.duration_ticks)
-            if gap > TICKS_PER_BAR:
+            if gap > tpb:
                 phrases.append(current_phrase)
                 current_phrase = []
         current_phrase.append(note)
@@ -3773,19 +4486,19 @@ def generate_melody_expression(
         phrase_start = phrase[0].start_tick
         phrase_end = phrase[-1].start_tick + phrase[-1].duration_ticks
         phrase_dur = phrase_end - phrase_start
-        if phrase_dur < TICKS_PER_BAR:
+        if phrase_dur < tpb:
             continue
 
         # Rise 80→120 over first 60%, fall 120→70 over last 40%
         # One CC11 per bar boundary — natural, gradual dynamic arc
-        n_bars = max(1, phrase_dur // TICKS_PER_BAR)
+        n_bars = max(1, phrase_dur // tpb)
         if n_bars < 2:
             # Short phrase: just set a flat value
             ccs.append(CCEvent(cc_number=11, value=100,
                                start_tick=phrase_start, channel=channel))
             continue
         for bar_idx in range(n_bars + 1):
-            t = phrase_start + bar_idx * TICKS_PER_BAR
+            t = phrase_start + bar_idx * tpb
             if t > phrase_end:
                 break
             frac = bar_idx / n_bars

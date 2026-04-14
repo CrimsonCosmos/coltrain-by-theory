@@ -8,7 +8,7 @@ import math
 import random
 from typing import List, Optional, Tuple
 
-from . import NoteEvent, CCEvent, BarFeel, TICKS_PER_QUARTER, TICKS_PER_BAR, TICKS_PER_8TH, TICKS_PER_16TH
+from . import NoteEvent, CCEvent, BarFeel, TICKS_PER_QUARTER, TICKS_PER_BAR, TICKS_PER_8TH, TICKS_PER_16TH, ticks_per_bar
 
 # Module-level rhythmic feel state (set per bar in generator loop)
 _current_feel: Optional[BarFeel] = None
@@ -509,6 +509,27 @@ def _comping_velocity(intensity: float, context: str) -> Tuple[int, int]:
 
 
 # ---------------------------------------------------------------------------
+# Descending chord cascade (Tatum-style parallel motion)
+# ---------------------------------------------------------------------------
+
+
+def _cascade_voicings(start_voicing: List[int],
+                      steps: int, step_beats: float = 0.5) -> List[Tuple[List[int], float]]:
+    """Generate a descending chord cascade: each voicing drops ~2-3 semitones.
+
+    Returns list of (voicing, beat_offset) pairs.
+    """
+    result: List[Tuple[List[int], float]] = []
+    current = list(start_voicing)
+    for i in range(steps):
+        result.append((list(current), i * step_beats))
+        # Drop each note 2-3 semitones, keeping voices distinct
+        current = [max(COMP_LOW, n - random.choice([2, 3])) for n in current]
+        current = sorted(set(current))
+    return result
+
+
+# ---------------------------------------------------------------------------
 # Main generator
 # ---------------------------------------------------------------------------
 
@@ -519,7 +540,8 @@ def generate_comping(chords, total_beats: int, intensity: float = 0.5,
                       sync_probability: float = 0.25,
                       context: str = "solo",
                       bar_intensities: Optional[List[float]] = None,
-                      bar_feel: Optional[list] = None) -> List[NoteEvent]:
+                      bar_feel: Optional[list] = None,
+                      beats_per_bar: int = 4) -> List[NoteEvent]:
     """Generate piano comping voicings over a chord progression.
 
     Args:
@@ -537,7 +559,8 @@ def generate_comping(chords, total_beats: int, intensity: float = 0.5,
         return []
 
     intensity = max(0.0, min(1.0, intensity))
-    total_bars = total_beats // 4
+    tpb = ticks_per_bar(beats_per_bar)
+    total_bars = total_beats // beats_per_bar
     notes: List[NoteEvent] = []
 
     # Unified voicing palette: blends Evans open voicings, Monk stride,
@@ -562,8 +585,8 @@ def generate_comping(chords, total_beats: int, intensity: float = 0.5,
         global _current_feel
         _current_feel = bar_feel[bar_idx] if bar_feel and bar_idx < len(bar_feel) else None
 
-        bar_start_beat = bar_idx * 4.0
-        bar_start_tick = bar_idx * TICKS_PER_BAR
+        bar_start_beat = bar_idx * float(beats_per_bar)
+        bar_start_tick = bar_idx * tpb
 
         # Per-bar reactive intensity
         local_intensity = (bar_intensities[bar_idx]
@@ -600,7 +623,7 @@ def generate_comping(chords, total_beats: int, intensity: float = 0.5,
 
         # Bass-piano sync: place a chord voicing at a bass downbeat tick
         if bass_sync_ticks and random.random() < sync_probability:
-            bar_end_tick = bar_start_tick + TICKS_PER_BAR
+            bar_end_tick = bar_start_tick + tpb
             bar_sync_ticks = [t for t in bass_sync_ticks
                               if bar_start_tick <= t < bar_end_tick]
             if bar_sync_ticks:
@@ -655,6 +678,31 @@ def generate_comping(chords, total_beats: int, intensity: float = 0.5,
         phrase_pos = (bar_idx % phrase_length) / max(1, phrase_length - 1)
         vel_phrase_mult = 0.85 + 0.30 * math.sin(phrase_pos * math.pi)
 
+        # Descending chord cascade: triggered at phrase boundaries at high intensity
+        if (local_intensity > 0.65
+                and bar_idx % phrase_length == phrase_length - 1
+                and len(prev_voicing) >= 3
+                and random.random() < 0.20):
+            cascade = _cascade_voicings(prev_voicing, steps=random.randint(4, 8))
+            vel_lo, vel_hi = _comping_velocity(local_intensity, context)
+            for casc_voicing, casc_offset in cascade:
+                casc_tick = bar_start_tick + int(casc_offset * TICKS_PER_QUARTER)
+                casc_tick = _humanize_tick(casc_tick, amount=12)
+                casc_vel = max(1, min(127, round(
+                    random.randint(vel_lo, vel_hi) * vel_phrase_mult * 0.9)))
+                spread_amount = random.randint(5, 15)
+                for note_idx, midi_pitch in enumerate(sorted(casc_voicing)):
+                    note_tick = casc_tick + (note_idx * spread_amount // max(1, len(casc_voicing) - 1))
+                    notes.append(NoteEvent(
+                        pitch=midi_pitch,
+                        start_tick=max(0, note_tick),
+                        duration_ticks=int(0.4 * TICKS_PER_QUARTER),
+                        velocity=_humanize_velocity(casc_vel - note_idx * 2, amount=3),
+                        channel=1,
+                    ))
+                prev_voicing = casc_voicing
+            continue  # Skip normal pattern for this bar
+
         for beat_offset, duration_beats in pattern:
             abs_beat = bar_start_beat + beat_offset
 
@@ -679,6 +727,17 @@ def generate_comping(chords, total_beats: int, intensity: float = 0.5,
             )
             if not voicing:
                 continue
+
+            # Octave doubling: reinforce top note an octave lower at high intensity
+            # (Tatum-style fullness — 38% of chords in reference)
+            if (local_intensity > 0.55
+                    and len(voicing) >= 3
+                    and random.random() < 0.35 * local_intensity):
+                top_note = max(voicing)
+                doubled = top_note - 12
+                if doubled >= COMP_LOW and doubled not in voicing:
+                    voicing = sorted(voicing + [doubled])
+
             prev_voicing = voicing
 
             # Calculate tick position with swing
@@ -760,7 +819,8 @@ def generate_comping(chords, total_beats: int, intensity: float = 0.5,
 def harmonize_head_melody(melody_notes: List[NoteEvent],
                           chords: list,
                           total_beats: int,
-                          swing: bool = True) -> List[NoteEvent]:
+                          swing: bool = True,
+                          beats_per_bar: int = 4) -> List[NoteEvent]:
     """Add block chord harmonization below head melody notes.
 
     On strong beats with sustained notes, adds 2 chord tones below the
@@ -782,7 +842,8 @@ def harmonize_head_melody(melody_notes: List[NoteEvent],
     result = list(melody_notes)
 
     for note in melody_notes:
-        beat_in_bar = (note.start_tick % TICKS_PER_BAR) / TICKS_PER_QUARTER
+        tpb_local = ticks_per_bar(beats_per_bar)
+        beat_in_bar = (note.start_tick % tpb_local) / TICKS_PER_QUARTER
 
         # Harmonize on strong beats (1 and 3) with longer notes
         is_strong_beat = (beat_in_bar < 0.3 or abs(beat_in_bar - 2.0) < 0.3)
@@ -848,7 +909,8 @@ def harmonize_head_melody(melody_notes: List[NoteEvent],
 
 
 def generate_sustain_pedal(piano_notes: List[NoteEvent],
-                            channel: int = 0) -> List[CCEvent]:
+                            channel: int = 0,
+                            beats_per_bar: int = 4) -> List[CCEvent]:
     """Generate sustain pedal (CC64) events from piano note timings.
 
     Groups piano notes by approximate start tick (within 20-tick window = same voicing).
@@ -884,7 +946,7 @@ def generate_sustain_pedal(piano_notes: List[NoteEvent],
         if i + 1 < len(voicing_ticks):
             pedal_up_tick = max(pedal_down_tick + 1, voicing_ticks[i + 1] - 15)
         else:
-            pedal_up_tick = tick + TICKS_PER_BAR
+            pedal_up_tick = tick + ticks_per_bar(beats_per_bar)
 
         # Pedal up (release previous) just before pedal down
         if i > 0:

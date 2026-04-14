@@ -12,6 +12,11 @@ TICKS_PER_16TH = 120
 TICKS_PER_BAR = 1920  # 4 beats * 480
 
 
+def ticks_per_bar(beats_per_bar: int = 4) -> int:
+    """Return the number of ticks in one bar for a given meter."""
+    return beats_per_bar * TICKS_PER_QUARTER
+
+
 # ---------------------------------------------------------------------------
 # Core data type
 # ---------------------------------------------------------------------------

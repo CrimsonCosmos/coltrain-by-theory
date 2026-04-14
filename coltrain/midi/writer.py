@@ -6,7 +6,7 @@ and correct channel/program assignments for each instrument.
 """
 
 import os
-from typing import Dict, List
+from typing import Dict, List, Tuple
 
 import mido
 
@@ -63,6 +63,7 @@ def write_midi(
     lead_instrument: str = "sax",
     cc_events: Dict[str, List] = None,
     pitch_bend_events: Dict[str, List] = None,
+    time_sig: Tuple[int, int] = (4, 4),
 ) -> int:
     """Write a multi-track MIDI file from generated NoteEvent data.
 
@@ -82,7 +83,7 @@ def write_midi(
     tempo_track = mido.MidiTrack()
     mid.tracks.append(tempo_track)
     tempo_track.append(mido.MetaMessage("set_tempo", tempo=mido.bpm2tempo(tempo), time=0))
-    tempo_track.append(mido.MetaMessage("time_signature", numerator=4, denominator=4, time=0))
+    tempo_track.append(mido.MetaMessage("time_signature", numerator=time_sig[0], denominator=time_sig[1], time=0))
     tempo_track.append(mido.MetaMessage("track_name", name="Coltrain", time=0))
 
     # Override melody program if a different lead instrument was chosen
@@ -202,7 +203,8 @@ def write_midi(
 # ---------------------------------------------------------------------------
 
 
-def write_chord_chart(chords, output_path: str, bars_per_line: int = 4) -> None:
+def write_chord_chart(chords, output_path: str, bars_per_line: int = 4,
+                      beats_per_bar: int = 4) -> None:
     """Write a text-file chord chart from a list of ChordEvent objects.
 
     Each bar shows the chord symbol(s) active during that bar. Bars are grouped
@@ -219,15 +221,15 @@ def write_chord_chart(chords, output_path: str, bars_per_line: int = 4) -> None:
 
     # Find total duration
     total_beats = max(c.start_beat + c.duration_beats for c in chords)
-    total_bars = int(total_beats) // 4
-    if total_beats % 4 > 0:
+    total_bars = int(total_beats) // beats_per_bar
+    if total_beats % beats_per_bar > 0:
         total_bars += 1
 
     # Build bar contents
     bar_contents = []
     for bar_idx in range(total_bars):
-        bar_start = bar_idx * 4.0
-        bar_end = bar_start + 4.0
+        bar_start = bar_idx * float(beats_per_bar)
+        bar_end = bar_start + float(beats_per_bar)
 
         # Find all chords active during this bar
         bar_chords = []

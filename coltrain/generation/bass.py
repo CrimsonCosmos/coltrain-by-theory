@@ -9,7 +9,7 @@ import random
 from dataclasses import dataclass, field
 from typing import List, Optional, Tuple
 
-from . import NoteEvent, CCEvent, PitchBendEvent, BarFeel, TICKS_PER_QUARTER, TICKS_PER_BAR, TICKS_PER_8TH
+from . import NoteEvent, CCEvent, PitchBendEvent, BarFeel, TICKS_PER_QUARTER, TICKS_PER_BAR, TICKS_PER_8TH, ticks_per_bar
 
 # Module-level rhythmic feel state (set per bar in generator loop)
 _current_feel: Optional[BarFeel] = None
@@ -227,11 +227,11 @@ def _chord_at_beat(chords, beat: float):
     return chords[-1] if chords else None
 
 
-def _next_chord_at_bar(chords, bar_start_beat: float):
-    """Return the chord active at the start of the NEXT bar (bar_start_beat + 4).
+def _next_chord_at_bar(chords, bar_start_beat: float, beats_per_bar: int = 4):
+    """Return the chord active at the start of the NEXT bar.
     If none, return the current chord.
     """
-    next_bar_beat = bar_start_beat + 4.0
+    next_bar_beat = bar_start_beat + float(beats_per_bar)
     return _chord_at_beat(chords, next_bar_beat)
 
 
@@ -498,7 +498,7 @@ def _generate_melodic_fragment(
 
 def _generate_held_note(
     bar_start_tick: int, chord, current_midi: int, intensity: float,
-    swing: bool,
+    swing: bool, beats_per_bar: int = 4,
 ) -> Tuple[List[NoteEvent], int]:
     """Generate a single held chord tone for half or whole bar.
 
@@ -537,7 +537,7 @@ def _generate_held_note(
 
     # Half bar or whole bar
     if random.random() < 0.45:
-        dur = TICKS_PER_BAR - random.randint(30, 60)
+        dur = ticks_per_bar(beats_per_bar) - random.randint(30, 60)
     else:
         dur = 2 * TICKS_PER_QUARTER - random.randint(20, 40)
 
@@ -655,7 +655,8 @@ def generate_walking_bass(chords, total_beats: int, swing: bool = True,
                           intensity: float = 0.5,
                           bar_intensities: Optional[List[float]] = None,
                           bar_context: Optional[list] = None,
-                          bar_feel: Optional[list] = None) -> List[NoteEvent]:
+                          bar_feel: Optional[list] = None,
+                          beats_per_bar: int = 4) -> List[NoteEvent]:
     """Generate a walking bass line over the given chord progression.
 
     Args:
@@ -672,7 +673,8 @@ def generate_walking_bass(chords, total_beats: int, swing: bool = True,
         return []
 
     notes: List[NoteEvent] = []
-    total_bars = total_beats // 4
+    tpb = ticks_per_bar(beats_per_bar)
+    total_bars = total_beats // beats_per_bar
 
     # Start on the root of the first chord, in a comfortable range
     first_chord = chords[0]
@@ -684,20 +686,21 @@ def generate_walking_bass(chords, total_beats: int, swing: bool = True,
         global _current_feel
         _current_feel = bar_feel[bar_idx] if bar_feel and bar_idx < len(bar_feel) else None
 
-        bar_start_beat = bar_idx * 4.0
-        bar_start_tick = bar_idx * TICKS_PER_BAR
+        bar_start_beat = bar_idx * float(beats_per_bar)
+        bar_start_tick = bar_idx * tpb
 
         chord = _chord_at_beat(chords, bar_start_beat)
         if chord is None:
             continue
 
-        # Get the chord active at beat 3 (might be different if chord changes mid-bar)
-        chord_beat3 = _chord_at_beat(chords, bar_start_beat + 2.0)
+        # Get the chord active at mid-bar (might be different if chord changes mid-bar)
+        mid_beat = beats_per_bar // 2
+        chord_beat3 = _chord_at_beat(chords, bar_start_beat + mid_beat)
         if chord_beat3 is None:
             chord_beat3 = chord
 
-        # Look ahead to the next bar's chord for approach note on beat 4
-        next_chord = _next_chord_at_bar(chords, bar_start_beat)
+        # Look ahead to the next bar's chord for approach note on last beat
+        next_chord = _next_chord_at_bar(chords, bar_start_beat, beats_per_bar)
 
         root_pc = chord.root_pc
         quality = chord.quality
@@ -730,6 +733,7 @@ def generate_walking_bass(chords, total_beats: int, swing: bool = True,
                                        bar_idx, total_bars, chord, next_chord)
 
         if texture == "two_feel":
+            tf_mid = beats_per_bar // 2 + (1 if beats_per_bar % 2 else 0)
             beat1_midi = _nearest_bass_note(root_pc, current_midi)
             if abs(beat1_midi - current_midi) > 7:
                 alt = beat1_midi + (-12 if beat1_midi > current_midi else 12)
@@ -740,11 +744,11 @@ def generate_walking_bass(chords, total_beats: int, swing: bool = True,
             notes.append(NoteEvent(
                 pitch=beat1_midi,
                 start_tick=tick1,
-                duration_ticks=2 * TICKS_PER_QUARTER - random.randint(20, 40),
+                duration_ticks=tf_mid * TICKS_PER_QUARTER - random.randint(20, 40),
                 velocity=vel1,
                 channel=0,
             ))
-            # Beat 3: 5th or root
+            # Mid-bar: 5th or root
             fifth_int = 7
             for iv in CHORD_TONES.get(chord_beat3.quality, (0, 4, 7)):
                 if 6 <= iv <= 8:
@@ -752,12 +756,12 @@ def generate_walking_bass(chords, total_beats: int, swing: bool = True,
                     break
             b3_pc = (chord_beat3.root_pc + fifth_int) % 12 if random.random() < 0.5 else chord_beat3.root_pc
             beat3_midi = _nearest_bass_note(b3_pc, beat1_midi)
-            tick3 = _humanize_tick(bar_start_tick + 2 * TICKS_PER_QUARTER, amount=22 if swing else 8)
+            tick3 = _humanize_tick(bar_start_tick + tf_mid * TICKS_PER_QUARTER, amount=22 if swing else 8)
             vel3 = _humanize_velocity(_bass_velocity_for_beat(2, accent_style, local_intensity))
             notes.append(NoteEvent(
                 pitch=beat3_midi,
                 start_tick=tick3,
-                duration_ticks=2 * TICKS_PER_QUARTER - random.randint(20, 40),
+                duration_ticks=(beats_per_bar - tf_mid) * TICKS_PER_QUARTER - random.randint(20, 40),
                 velocity=vel3,
                 channel=0,
             ))
@@ -774,7 +778,8 @@ def generate_walking_bass(chords, total_beats: int, swing: bool = True,
 
         if texture == "held":
             held_notes, held_pitch = _generate_held_note(
-                bar_start_tick, chord, current_midi, local_intensity, swing)
+                bar_start_tick, chord, current_midi, local_intensity, swing,
+                beats_per_bar=beats_per_bar)
             notes.extend(held_notes)
             current_midi = held_pitch
             continue
@@ -981,21 +986,60 @@ def generate_walking_bass(chords, total_beats: int, swing: bool = True,
                     velocity=vel3, channel=0,
                 ))
 
-        # ---- BEAT 4: Varied approach to next chord's root ----
+        # ---- EXTRA MID-BAR BEATS for odd meters (between beat 3 and approach) ----
+        # In 5/4: beat 4 is a passing tone, beat 5 is approach
+        # In 7/4: beats 4-6 are passing/chord tones, beat 7 is approach
+        last_mid_midi = beat3_midi
+        approach_beat_idx = beats_per_bar - 1  # Last beat = approach
+        for extra_beat in range(3, approach_beat_idx):
+            # Alternate between chord tones and scale steps toward approach target
+            if next_chord is not None:
+                target_pc = next_chord.root_pc
+            else:
+                target_pc = root_pc
+            target_midi = _nearest_bass_note(target_pc, last_mid_midi)
+
+            if extra_beat % 2 == 1:
+                # Chord tone of current harmony
+                ct_cands = [n for n in chord_tone_list
+                            if n != last_mid_midi and abs(n - last_mid_midi) <= 7]
+                if ct_cands:
+                    extra_midi = random.choice(ct_cands)
+                else:
+                    extra_midi = _scale_step_toward(last_mid_midi, target_midi,
+                                                    root_pc, quality)
+            else:
+                # Scale step toward approach target
+                extra_midi = _scale_step_toward(last_mid_midi, target_midi,
+                                                root_pc, quality)
+            extra_midi = _clamp(extra_midi)
+            tick_extra = _humanize_tick(
+                bar_start_tick + extra_beat * TICKS_PER_QUARTER,
+                amount=22 if swing else 8)
+            vel_extra = _humanize_velocity(
+                _bass_velocity_for_beat(1, accent_style, local_intensity))
+            notes.append(NoteEvent(
+                pitch=extra_midi, start_tick=tick_extra,
+                duration_ticks=_bass_duration_mid(),
+                velocity=vel_extra, channel=0,
+            ))
+            last_mid_midi = extra_midi
+
+        # ---- LAST BEAT: Varied approach to next chord's root ----
         if next_chord is not None:
             approach_target_pc = next_chord.root_pc
         else:
             approach_target_pc = root_pc
 
-        approach_target_midi = _nearest_bass_note(approach_target_pc, beat3_midi)
+        approach_target_midi = _nearest_bass_note(approach_target_pc, last_mid_midi)
 
         b4_roll = random.random()
         if b4_roll < 0.20:
             # Chromatic enclosure: two 8th notes surrounding the target
             enc_a, enc_b = _chromatic_enclosure(approach_target_midi)
-            tick4a = _humanize_tick(bar_start_tick + 3 * TICKS_PER_QUARTER, amount=12)
+            tick4a = _humanize_tick(bar_start_tick + approach_beat_idx * TICKS_PER_QUARTER, amount=12)
             tick4b = _humanize_tick(
-                bar_start_tick + 3 * TICKS_PER_QUARTER + TICKS_PER_8TH, amount=12)
+                bar_start_tick + approach_beat_idx * TICKS_PER_QUARTER + TICKS_PER_8TH, amount=12)
             vel4 = _humanize_velocity(_bass_velocity_for_beat(3, accent_style, local_intensity))
             notes.append(NoteEvent(
                 pitch=enc_a, start_tick=tick4a,
@@ -1016,22 +1060,23 @@ def generate_walking_bass(chords, total_beats: int, swing: bool = True,
             elif b4_roll < 0.75:
                 # Diatonic scale step toward target
                 beat4_midi = _scale_step_toward(
-                    beat3_midi, approach_target_midi,
+                    last_mid_midi, approach_target_midi,
                     chord_beat3.root_pc, chord_beat3.quality)
             elif b4_roll < 0.90:
                 # Double chromatic — two semitones away for a longer run-in
-                direction = 1 if approach_target_midi > beat3_midi else -1
+                direction = 1 if approach_target_midi > last_mid_midi else -1
                 beat4_midi = _clamp(approach_target_midi + direction * 2)
             else:
                 # Anticipation — play the target note itself early
                 beat4_midi = approach_target_midi
 
-            # Avoid repeating beat 3's pitch on beat 4
-            if beat4_midi == beat3_midi:
+            # Avoid repeating previous pitch
+            if beat4_midi == last_mid_midi:
                 beat4_midi = _clamp(beat4_midi + random.choice([-1, 1]))
 
             beat4_midi = _clamp(beat4_midi)
-            tick4 = _humanize_tick(bar_start_tick + 3 * TICKS_PER_QUARTER, amount=22 if swing else 8)
+            tick4 = _humanize_tick(bar_start_tick + approach_beat_idx * TICKS_PER_QUARTER,
+                                  amount=22 if swing else 8)
             vel4 = _humanize_velocity(_bass_velocity_for_beat(3, accent_style, local_intensity))
             notes.append(NoteEvent(
                 pitch=beat4_midi,
@@ -1043,11 +1088,11 @@ def generate_walking_bass(chords, total_beats: int, swing: bool = True,
 
         # High intensity: occasional 8th-note pickup into next bar's beat 1
         if local_intensity > 0.7 and random.random() < 0.20 and bar_idx < total_bars - 1:
-            next_bar_chord = _chord_at_beat(chords, (bar_idx + 1) * 4.0)
+            next_bar_chord = _chord_at_beat(chords, (bar_idx + 1) * float(beats_per_bar))
             if next_bar_chord is not None:
                 pickup_target = _nearest_bass_note(next_bar_chord.root_pc, beat4_midi)
                 pickup_midi = _chromatic_approach(pickup_target)
-                pickup_tick = bar_start_tick + 3 * TICKS_PER_QUARTER + TICKS_PER_8TH
+                pickup_tick = bar_start_tick + approach_beat_idx * TICKS_PER_QUARTER + TICKS_PER_8TH
                 notes.append(NoteEvent(
                     pitch=_clamp(pickup_midi),
                     start_tick=_humanize_tick(pickup_tick, amount=12),
@@ -1062,37 +1107,35 @@ def generate_walking_bass(chords, total_beats: int, swing: bool = True,
     return notes
 
 
-def generate_two_feel_bass(chords, total_beats: int, swing: bool = True) -> List[NoteEvent]:
-    """Generate a two-feel bass line (half notes on beats 1 and 3).
+def generate_two_feel_bass(chords, total_beats: int, swing: bool = True,
+                           beats_per_bar: int = 4) -> List[NoteEvent]:
+    """Generate a two-feel bass line (half notes on beats 1 and mid-bar).
 
     Used for intros, endings, ballads, or lower-intensity sections.
-
-    Args:
-        chords: List of ChordEvent objects.
-        total_beats: Total number of beats to generate.
-        swing: Whether to apply swing feel.
-
-    Returns:
-        List of NoteEvent objects.
+    For 5/4: beat 1 (dotted half) + beat 4 (half). For 7/4: beat 1 + beat 4.
     """
     if not chords:
         return []
 
     notes: List[NoteEvent] = []
-    total_bars = total_beats // 4
+    tpb = ticks_per_bar(beats_per_bar)
+    total_bars = total_beats // beats_per_bar
     current_midi = _nearest_bass_note(chords[0].root_pc, 40)
 
+    # Two-feel split point: where the second note starts
+    mid_beat = beats_per_bar // 2 + (1 if beats_per_bar % 2 else 0)  # 2 for 4/4, 3 for 5/4, 4 for 7/4
+
     for bar_idx in range(total_bars):
-        bar_start_beat = bar_idx * 4.0
-        bar_start_tick = bar_idx * TICKS_PER_BAR
+        bar_start_beat = bar_idx * float(beats_per_bar)
+        bar_start_tick = bar_idx * tpb
 
         chord = _chord_at_beat(chords, bar_start_beat)
         if chord is None:
             continue
 
-        chord_beat3 = _chord_at_beat(chords, bar_start_beat + 2.0)
-        if chord_beat3 is None:
-            chord_beat3 = chord
+        chord_mid = _chord_at_beat(chords, bar_start_beat + mid_beat)
+        if chord_mid is None:
+            chord_mid = chord
 
         # ---- Beat 1: Root ----
         beat1_midi = _nearest_bass_note(chord.root_pc, current_midi)
@@ -1109,16 +1152,17 @@ def generate_two_feel_bass(chords, total_beats: int, swing: bool = True) -> List
 
         tick1 = _humanize_tick(bar_start_tick, amount=5)
         vel1 = _humanize_velocity(random.randint(80, 95))
+        dur1 = mid_beat * TICKS_PER_QUARTER - 40
         notes.append(NoteEvent(
             pitch=beat1_midi,
             start_tick=tick1,
-            duration_ticks=2 * TICKS_PER_QUARTER - 40,  # Half note, slight gap
+            duration_ticks=dur1,
             velocity=vel1,
             channel=0,
         ))
 
-        # ---- Beat 3: 5th or root of chord at beat 3 ----
-        intervals = CHORD_TONES.get(chord_beat3.quality, (0, 4, 7))
+        # ---- Mid-bar beat: 5th or root of chord at mid-bar ----
+        intervals = CHORD_TONES.get(chord_mid.quality, (0, 4, 7))
         r = random.random()
         if r < 0.6:
             # 5th
@@ -1127,20 +1171,21 @@ def generate_two_feel_bass(chords, total_beats: int, swing: bool = True) -> List
                 if 6 <= iv <= 8:
                     fifth_interval = iv
                     break
-            beat3_pc = (chord_beat3.root_pc + fifth_interval) % 12
+            beat3_pc = (chord_mid.root_pc + fifth_interval) % 12
         else:
             # Root
-            beat3_pc = chord_beat3.root_pc
+            beat3_pc = chord_mid.root_pc
 
         beat3_midi = _nearest_bass_note(beat3_pc, beat1_midi)
         beat3_midi = _clamp(beat3_midi)
 
-        tick3 = _humanize_tick(bar_start_tick + 2 * TICKS_PER_QUARTER, amount=5)
+        remaining_beats = beats_per_bar - mid_beat
+        tick3 = _humanize_tick(bar_start_tick + mid_beat * TICKS_PER_QUARTER, amount=5)
         vel3 = _humanize_velocity(random.randint(75, 90))
         notes.append(NoteEvent(
             pitch=beat3_midi,
             start_tick=tick3,
-            duration_ticks=2 * TICKS_PER_QUARTER - 40,
+            duration_ticks=remaining_beats * TICKS_PER_QUARTER - 40,
             velocity=vel3,
             channel=0,
         ))
@@ -1150,7 +1195,8 @@ def generate_two_feel_bass(chords, total_beats: int, swing: bool = True) -> List
     return notes
 
 
-def generate_modal_bass(chords, total_beats: int, swing: bool = True) -> List[NoteEvent]:
+def generate_modal_bass(chords, total_beats: int, swing: bool = True,
+                        beats_per_bar: int = 4) -> List[NoteEvent]:
     """Generate a modal/pedal-point bass line — root and 5th, half/whole notes.
 
     Used for modal jazz (Impressions, So What, etc.) where the harmony is
@@ -1160,12 +1206,13 @@ def generate_modal_bass(chords, total_beats: int, swing: bool = True) -> List[No
         return []
 
     notes: List[NoteEvent] = []
-    total_bars = total_beats // 4
+    tpb = ticks_per_bar(beats_per_bar)
+    total_bars = total_beats // beats_per_bar
     current_midi = _nearest_bass_note(chords[0].root_pc, 40)
 
     for bar_idx in range(total_bars):
-        bar_start_beat = bar_idx * 4.0
-        bar_start_tick = bar_idx * TICKS_PER_BAR
+        bar_start_beat = bar_idx * float(beats_per_bar)
+        bar_start_tick = bar_idx * tpb
 
         chord = _chord_at_beat(chords, bar_start_beat)
         if chord is None:
@@ -1185,6 +1232,9 @@ def generate_modal_bass(chords, total_beats: int, swing: bool = True) -> List[No
         fifth_midi = _nearest_bass_note(fifth_pc, root_midi)
 
         # Pattern varies per bar
+        mid_beat = beats_per_bar // 2 + (1 if beats_per_bar % 2 else 0)
+        first_half_ticks = mid_beat * TICKS_PER_QUARTER
+        second_half_ticks = (beats_per_bar - mid_beat) * TICKS_PER_QUARTER
         pattern_roll = random.random()
         if pattern_roll < 0.5:
             # Whole note on root
@@ -1193,47 +1243,47 @@ def generate_modal_bass(chords, total_beats: int, swing: bool = True) -> List[No
             notes.append(NoteEvent(
                 pitch=root_midi,
                 start_tick=tick,
-                duration_ticks=TICKS_PER_BAR - 40,
+                duration_ticks=tpb - 40,
                 velocity=vel,
                 channel=0,
             ))
         elif pattern_roll < 0.8:
-            # Half note root, half note 5th
+            # First half root, second half 5th
             tick1 = _humanize_tick(bar_start_tick, amount=5)
             vel1 = _humanize_velocity(random.randint(80, 95))
             notes.append(NoteEvent(
                 pitch=root_midi,
                 start_tick=tick1,
-                duration_ticks=2 * TICKS_PER_QUARTER - 40,
+                duration_ticks=first_half_ticks - 40,
                 velocity=vel1,
                 channel=0,
             ))
-            tick2 = _humanize_tick(bar_start_tick + 2 * TICKS_PER_QUARTER, amount=5)
+            tick2 = _humanize_tick(bar_start_tick + first_half_ticks, amount=5)
             vel2 = _humanize_velocity(random.randint(75, 90))
             notes.append(NoteEvent(
                 pitch=fifth_midi,
                 start_tick=tick2,
-                duration_ticks=2 * TICKS_PER_QUARTER - 40,
+                duration_ticks=second_half_ticks - 40,
                 velocity=vel2,
                 channel=0,
             ))
         else:
-            # Half note 5th, half note root (inverted)
+            # First half 5th, second half root (inverted)
             tick1 = _humanize_tick(bar_start_tick, amount=5)
             vel1 = _humanize_velocity(random.randint(75, 90))
             notes.append(NoteEvent(
                 pitch=fifth_midi,
                 start_tick=tick1,
-                duration_ticks=2 * TICKS_PER_QUARTER - 40,
+                duration_ticks=first_half_ticks - 40,
                 velocity=vel1,
                 channel=0,
             ))
-            tick2 = _humanize_tick(bar_start_tick + 2 * TICKS_PER_QUARTER, amount=5)
+            tick2 = _humanize_tick(bar_start_tick + first_half_ticks, amount=5)
             vel2 = _humanize_velocity(random.randint(80, 95))
             notes.append(NoteEvent(
                 pitch=root_midi,
                 start_tick=tick2,
-                duration_ticks=2 * TICKS_PER_QUARTER - 40,
+                duration_ticks=second_half_ticks - 40,
                 velocity=vel2,
                 channel=0,
             ))
@@ -1253,7 +1303,8 @@ BASS_SOLO_HIGH = 62  # D4
 
 
 def generate_bass_solo(chords, total_beats: int, swing: bool = True,
-                       intensity: float = 0.7) -> List[NoteEvent]:
+                       intensity: float = 0.7,
+                       beats_per_bar: int = 4) -> List[NoteEvent]:
     """Generate a melodic jazz bass solo over chord changes.
 
     Uses the upper register of the bass with a mix of chord tones,
@@ -1264,7 +1315,8 @@ def generate_bass_solo(chords, total_beats: int, swing: bool = True,
         return []
 
     intensity = max(0.0, min(1.0, intensity))
-    total_bars = total_beats // 4
+    tpb = ticks_per_bar(beats_per_bar)
+    total_bars = total_beats // beats_per_bar
     notes: List[NoteEvent] = []
 
     # Start near middle of solo range
@@ -1293,8 +1345,8 @@ def generate_bass_solo(chords, total_beats: int, swing: bool = True,
 
         for pb in range(phrase_bars):
             bi = bar_idx + pb
-            bar_start_beat = bi * 4.0
-            bar_start_tick = bi * TICKS_PER_BAR
+            bar_start_beat = bi * float(beats_per_bar)
+            bar_start_tick = bi * tpb
 
             chord = _chord_at_beat(chords, bar_start_beat)
             if chord is None:
@@ -1396,7 +1448,7 @@ def generate_bass_solo(chords, total_beats: int, swing: bool = True,
                 if ct:
                     current_midi = min(ct, key=lambda n: abs(n - current_midi))
                 tick = _humanize_tick(bar_start_tick, 5)
-                dur = random.choice([2 * TICKS_PER_QUARTER, TICKS_PER_BAR - 40])
+                dur = random.choice([2 * TICKS_PER_QUARTER, tpb - 40])
                 vel = _humanize_velocity(vel_base)
                 notes.append(NoteEvent(
                     pitch=current_midi, start_tick=tick,
@@ -1437,6 +1489,7 @@ def generate_bass_expression(
     notes: List[NoteEvent],
     chords: list,
     channel: int = BASS_CHANNEL,
+    beats_per_bar: int = 4,
 ) -> tuple:
     """Generate pitch bend slides and CC11 expression curves for bass notes.
 
@@ -1460,7 +1513,7 @@ def generate_bass_expression(
 
         # --- Pitch bend slides ---
         # 20-40% of notes get a slide-up into the note (more on beat 1)
-        beat_in_bar = (start % TICKS_PER_BAR) / TICKS_PER_QUARTER
+        beat_in_bar = (start % ticks_per_bar(beats_per_bar)) / TICKS_PER_QUARTER
         is_beat_one = beat_in_bar < 0.3
         slide_prob = 0.35 if is_beat_one else 0.22
 
